@@ -1,0 +1,1462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Clouduck — Cloud File Manager</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:       #0d1117;
+  --surf:     #161b22;
+  --surf2:    #21262d;
+  --surf3:    #2d333b;
+  --border:   #30363d;
+  --border2:  #484f58;
+  --text:     #e6edf3;
+  --muted:    #8b949e;
+  --muted2:   #6e7681;
+  --accent:   #58a6ff;
+  --accent2:  #388bfd;
+  --green:    #3fb950;
+  --amber:    #d29922;
+  --red:      #f85149;
+  --purple:   #bc8cff;
+  --cyan:     #39c5cf;
+  --mono:     'JetBrains Mono', monospace;
+  --sans:     'Inter', sans-serif;
+  --toolbar:  44px;
+  --sidebar:  240px;
+  --queue:    160px;
+}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-font-smoothing:antialiased}
+html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:13px}
+button{cursor:pointer;font-family:inherit;font-size:13px}
+input,select{font-family:inherit;font-size:13px}
+a{color:var(--accent);text-decoration:none}
+
+/* ── LAYOUT ─────────────────────────────────────────── */
+#shell{display:flex;flex-direction:column;height:100vh}
+#menubar{height:28px;background:#1c2128;border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 12px;gap:1px;flex-shrink:0}
+#toolbar{height:var(--toolbar);background:var(--surf);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 10px;gap:6px;flex-shrink:0}
+#body{flex:1;display:flex;overflow:hidden}
+#sidebar{width:var(--sidebar);flex-shrink:0;background:var(--surf);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
+#main{flex:1;display:flex;flex-direction:column;overflow:hidden;background:var(--bg)}
+#browser{flex:1;overflow:hidden;display:flex;flex-direction:column}
+#statusbar{height:22px;background:var(--surf);border-top:1px solid var(--border);display:flex;align-items:center;padding:0 12px;gap:16px;font-size:11px;color:var(--muted);flex-shrink:0}
+#queue-panel{height:var(--queue);background:var(--surf);border-top:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0;transition:height 0.2s}
+#queue-panel.collapsed{height:24px}
+
+/* ── MENUBAR ─────────────────────────────────────────── */
+.menu-item{padding:2px 10px;font-size:12px;color:var(--muted);border-radius:3px;cursor:pointer;border:none;background:none}
+.menu-item:hover{background:var(--surf2);color:var(--text)}
+
+/* ── TOOLBAR ─────────────────────────────────────────── */
+.tb-btn{height:30px;min-width:30px;border:1px solid var(--border);border-radius:6px;background:var(--surf2);color:var(--muted);display:flex;align-items:center;justify-content:center;gap:5px;padding:0 8px;transition:all .15s;flex-shrink:0}
+.tb-btn:hover{border-color:var(--border2);color:var(--text);background:var(--surf3)}
+.tb-btn:active{transform:scale(.96)}
+.tb-btn.primary{background:var(--accent2);border-color:var(--accent);color:#fff}
+.tb-btn.primary:hover{background:var(--accent)}
+.tb-btn svg{width:14px;height:14px;flex-shrink:0}
+.tb-sep{width:1px;height:20px;background:var(--border);margin:0 2px;flex-shrink:0}
+#addressbar{flex:1;background:var(--surf2);border:1px solid var(--border);border-radius:6px;padding:5px 10px;color:var(--text);font-family:var(--mono);font-size:12px;outline:none;transition:border-color .15s}
+#addressbar:focus{border-color:var(--accent)}
+
+/* ── SIDEBAR ─────────────────────────────────────────── */
+.sidebar-section{padding:8px 0}
+.sidebar-label{font-size:10px;color:var(--muted2);letter-spacing:.1em;text-transform:uppercase;padding:0 12px;margin-bottom:4px}
+.bookmark-item{display:flex;align-items:center;gap:8px;padding:6px 12px;cursor:pointer;border-radius:0;border:none;background:none;width:100%;text-align:left;color:var(--muted);transition:background .12s,color .12s;position:relative}
+.bookmark-item:hover{background:var(--surf2);color:var(--text)}
+.bookmark-item.active{background:rgba(88,166,255,.12);color:var(--accent)}
+.bm-icon{width:22px;height:22px;border-radius:5px;display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0}
+.bm-info{flex:1;min-width:0}
+.bm-name{font-size:12px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bm-host{font-size:10px;color:var(--muted2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bm-remove{position:absolute;right:8px;background:none;border:none;color:var(--red);font-size:14px;opacity:0;padding:2px 4px;border-radius:3px}
+.bookmark-item:hover .bm-remove{opacity:1}
+.add-bm-btn{display:flex;align-items:center;gap:7px;padding:6px 12px;color:var(--muted2);cursor:pointer;border:none;background:none;width:100%;font-size:12px;transition:color .12s}
+.add-bm-btn:hover{color:var(--accent)}
+
+/* ── FILE BROWSER ──────────────────────────────────────── */
+#browser-header{padding:4px 16px;background:var(--surf);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;flex-shrink:0}
+.breadcrumb{display:flex;align-items:center;gap:4px;font-family:var(--mono);font-size:12px;flex:1;min-width:0;overflow:hidden}
+.crumb{color:var(--muted);cursor:pointer;white-space:nowrap;padding:2px 4px;border-radius:3px}
+.crumb:hover{color:var(--text);background:var(--surf2)}
+.crumb.current{color:var(--text);cursor:default}
+.crumb:hover.current{background:none}
+.crumb-sep{color:var(--muted2)}
+
+#file-table-wrap{flex:1;overflow-y:auto;overflow-x:hidden}
+#file-table{width:100%;border-collapse:collapse}
+#file-table thead th{position:sticky;top:0;background:var(--surf);border-bottom:1px solid var(--border);padding:6px 12px;text-align:left;font-size:11px;font-weight:600;color:var(--muted2);letter-spacing:.06em;text-transform:uppercase;cursor:pointer;user-select:none;white-space:nowrap;z-index:10}
+#file-table thead th:hover{color:var(--muted)}
+#file-table thead th.sorted{color:var(--accent)}
+#file-table tbody tr{border-bottom:1px solid rgba(48,54,61,.5);cursor:pointer;transition:background .08s}
+#file-table tbody tr:hover{background:var(--surf2)}
+#file-table tbody tr.selected{background:rgba(88,166,255,.1)}
+#file-table tbody tr.cut{opacity:.5}
+#file-table td{padding:6px 12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:0}
+td.name-cell{display:flex;align-items:center;gap:8px;max-width:none}
+.file-icon{font-size:16px;flex-shrink:0;width:20px;text-align:center}
+.file-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}
+.file-name.folder{color:var(--accent);font-weight:500}
+.col-name{width:45%}
+.col-size{width:10%;text-align:right}
+.col-type{width:18%}
+.col-date{width:18%}
+.col-acct{width:9%;text-align:center}
+.acct-pill{display:inline-block;width:10px;height:10px;border-radius:50%}
+.sort-arrow{margin-left:4px;color:var(--accent);font-size:10px}
+
+/* ── EMPTY / LOADING ────────────────────────────────────── */
+.state-box{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;flex:1;color:var(--muted);text-align:center;padding:40px;min-height:280px}
+.state-icon{font-size:56px;opacity:.25}
+.state-title{font-size:16px;font-weight:600;color:var(--text);font-family:var(--sans)}
+.state-sub{font-size:12px;line-height:1.7;max-width:340px}
+.spinner{width:20px;height:20px;border:2px solid var(--border2);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ── TRANSFER QUEUE ──────────────────────────────────────── */
+#queue-header{display:flex;align-items:center;padding:4px 12px;border-bottom:1px solid var(--border);cursor:pointer;user-select:none;flex-shrink:0}
+#queue-header span{font-size:11px;font-weight:600;color:var(--muted2);letter-spacing:.06em;text-transform:uppercase;flex:1}
+#queue-body{flex:1;overflow-y:auto}
+.transfer-row{display:flex;align-items:center;gap:10px;padding:6px 12px;border-bottom:1px solid rgba(48,54,61,.4)}
+.tr-icon{font-size:14px;flex-shrink:0}
+.tr-info{flex:1;min-width:0}
+.tr-name{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tr-status{font-size:10px;color:var(--muted);margin-top:2px}
+.progress-bar{height:3px;background:var(--surf3);border-radius:2px;margin-top:4px;overflow:hidden}
+.progress-fill{height:100%;background:var(--accent);border-radius:2px;transition:width .3s}
+.progress-fill.done{background:var(--green)}
+.progress-fill.error{background:var(--red)}
+
+/* ── MODAL ────────────────────────────────────────────── */
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;align-items:center;justify-content:center;z-index:500;backdrop-filter:blur(3px)}
+.overlay.open{display:flex}
+.modal{background:var(--surf);border:1px solid var(--border2);border-radius:12px;padding:0;width:100%;max-width:480px;margin:1rem;overflow:hidden}
+.modal-head{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.modal-head h2{font-size:15px;font-weight:600}
+.modal-close{background:none;border:none;color:var(--muted);font-size:18px;line-height:1;padding:2px;cursor:pointer;border-radius:4px}
+.modal-close:hover{color:var(--text);background:var(--surf2)}
+.modal-body{padding:20px}
+.modal-foot{padding:12px 20px;border-top:1px solid var(--border);display:flex;gap:8px;justify-content:flex-end}
+.field{margin-bottom:16px}
+.field label{display:block;font-size:11px;color:var(--muted);margin-bottom:5px;text-transform:uppercase;letter-spacing:.07em}
+.field input,.field select,.field textarea{width:100%;background:var(--surf2);border:1px solid var(--border2);border-radius:6px;padding:8px 10px;color:var(--text);font-family:var(--mono);font-size:12px;outline:none;transition:border-color .15s}
+.field input:focus,.field select:focus{border-color:var(--accent)}
+.field textarea{resize:vertical;min-height:60px}
+.field .hint{font-size:11px;color:var(--muted2);margin-top:4px;line-height:1.5}
+.field .hint a{color:var(--accent)}
+.field select option{background:var(--surf2)}
+.tabs{display:flex;gap:2px;margin-bottom:20px;background:var(--surf2);border-radius:8px;padding:3px}
+.tab{flex:1;padding:6px;text-align:center;border-radius:6px;cursor:pointer;border:none;background:none;color:var(--muted);font-size:12px;font-weight:500;transition:all .15s}
+.tab.active{background:var(--surf3);color:var(--text)}
+.tab-pane{display:none}
+.tab-pane.active{display:block}
+.btn{border-radius:6px;padding:7px 16px;font-size:13px;font-weight:500;border:none;cursor:pointer;transition:all .15s}
+.btn-primary{background:var(--accent2);color:#fff}
+.btn-primary:hover{background:var(--accent)}
+.btn-ghost{background:var(--surf2);color:var(--muted);border:1px solid var(--border2)}
+.btn-ghost:hover{color:var(--text);border-color:var(--border2)}
+.btn-danger{background:rgba(248,81,73,.15);color:var(--red);border:1px solid rgba(248,81,73,.3)}
+.btn-danger:hover{background:rgba(248,81,73,.25)}
+.type-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+.type-card{border:1px solid var(--border);border-radius:8px;padding:12px;cursor:pointer;transition:all .15s;display:flex;align-items:center;gap:10px}
+.type-card:hover{border-color:var(--border2);background:var(--surf2)}
+.type-card.selected{border-color:var(--accent);background:rgba(88,166,255,.08)}
+.type-icon{font-size:24px}
+.type-name{font-size:13px;font-weight:500}
+.type-desc{font-size:11px;color:var(--muted);margin-top:2px}
+
+/* ── CONTEXT MENU ──────────────────────────────────────── */
+#ctx-menu{position:fixed;background:var(--surf2);border:1px solid var(--border2);border-radius:8px;padding:4px;z-index:1000;min-width:180px;display:none;box-shadow:0 8px 32px rgba(0,0,0,.5)}
+.ctx-item{display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:5px;cursor:pointer;border:none;background:none;color:var(--text);font-size:12px;width:100%;text-align:left}
+.ctx-item:hover{background:var(--surf3)}
+.ctx-item.danger{color:var(--red)}
+.ctx-sep{height:1px;background:var(--border);margin:3px 0}
+
+/* ── TOAST ─────────────────────────────────────────── */
+#toasts{position:fixed;bottom:28px;right:16px;z-index:999;display:flex;flex-direction:column;gap:6px;pointer-events:none}
+.toast{background:var(--surf2);border:1px solid var(--border2);border-radius:8px;padding:9px 14px;font-size:12px;display:flex;align-items:center;gap:8px;max-width:320px;animation:toastIn .2s ease;pointer-events:all}
+.toast.success{border-color:rgba(63,185,80,.4);color:var(--green)}
+.toast.error{border-color:rgba(248,81,73,.4);color:var(--red)}
+.toast.info{color:var(--text)}
+@keyframes toastIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+
+/* ── DRAG OVERLAY ──────────────────────────────────────── */
+#drop-overlay{position:fixed;inset:0;background:rgba(88,166,255,.08);border:2px dashed var(--accent);display:none;align-items:center;justify-content:center;z-index:200;pointer-events:none}
+#drop-overlay.active{display:flex}
+.drop-msg{font-size:20px;font-weight:600;color:var(--accent);font-family:var(--sans)}
+
+/* ── SCROLLBAR ─────────────────────────────────────────── */
+::-webkit-scrollbar{width:6px;height:6px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--surf3);border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:var(--border2)}
+
+/* ── HIGHLIGHT ─────────────────────────────────────────── */
+::selection{background:rgba(88,166,255,.3)}
+</style>
+</head>
+<body>
+
+<div id="shell">
+
+  <!-- MENU BAR -->
+  <div id="menubar">
+    <button class="menu-item" onclick="openNewConn()">File</button>
+    <button class="menu-item" onclick="showEditMenu()">Edit</button>
+    <button class="menu-item">View</button>
+    <button class="menu-item" onclick="showHelp()">Help</button>
+  </div>
+
+  <!-- TOOLBAR -->
+  <div id="toolbar">
+    <button class="tb-btn" id="btn-back" onclick="goBack()" title="Back (Alt+←)">
+      <svg viewBox="0 0 16 16" fill="currentColor"><path d="M10.5 3.5L6 8l4.5 4.5" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <button class="tb-btn" id="btn-fwd" onclick="goForward()" title="Forward (Alt+→)">
+      <svg viewBox="0 0 16 16" fill="currentColor"><path d="M5.5 3.5L10 8l-4.5 4.5" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <button class="tb-btn" onclick="reload()" title="Reload (⌘R)">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M13.5 8A5.5 5.5 0 1 1 8 2.5"/><path d="M13.5 2.5v3h-3"/></svg>
+    </button>
+    <div class="tb-sep"></div>
+    <button class="tb-btn" onclick="promptNewFolder()" title="New Folder">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M1.5 3.5h4l1.5 2h7.5v9h-13v-11z"/><path d="M8 8v4M6 10h4"/></svg>
+    </button>
+    <button class="tb-btn" onclick="triggerUpload()" title="Upload Files">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 10V3m-3 3 3-3 3 3"/><path d="M2 13h12"/></svg>
+      <span style="font-size:11px">Upload</span>
+    </button>
+    <button class="tb-btn" onclick="downloadSelected()" title="Download Selected">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 3v8m-3-3 3 3 3-3"/><path d="M2 13h12"/></svg>
+      <span style="font-size:11px">Download</span>
+    </button>
+    <button class="tb-btn" onclick="deleteSelected()" title="Delete Selected" style="color:var(--red)">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2 4h12M5 4V2h6v2M6 7v5M10 7v5M3 4l1 10h8l1-10"/></svg>
+    </button>
+    <div class="tb-sep"></div>
+    <input type="text" id="addressbar" placeholder="/ root" readonly />
+    <div class="tb-sep"></div>
+    <button class="tb-btn primary" onclick="openNewConn()">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 2v12M2 8h12"/></svg>
+      <span style="font-size:11px">Connect</span>
+    </button>
+  </div>
+
+  <!-- BODY -->
+  <div id="body">
+
+    <!-- SIDEBAR -->
+    <div id="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-label">Bookmarks</div>
+        <div id="bookmark-list"></div>
+        <button class="add-bm-btn" onclick="openNewConn()">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 1v10M1 6h10"/></svg>
+          New Connection
+        </button>
+      </div>
+    </div>
+
+    <!-- MAIN -->
+    <div id="main">
+      <div id="browser">
+        <div id="browser-header">
+          <div class="breadcrumb" id="breadcrumb">
+            <span class="crumb current">Bookmarks</span>
+          </div>
+          <div style="display:flex;gap:4px;align-items:center;flex-shrink:0">
+            <input type="text" id="search-input" placeholder="Filter…" style="width:140px;background:var(--surf2);border:1px solid var(--border);border-radius:5px;padding:3px 8px;color:var(--text);outline:none;font-size:12px" oninput="filterFiles(this.value)">
+          </div>
+        </div>
+        <div id="file-table-wrap">
+          <div id="empty-state" class="state-box">
+            <div class="state-icon">☁</div>
+            <div class="state-title">No connection open</div>
+            <div class="state-sub">Click <strong>+ Connect</strong> in the toolbar or sidebar to add a cloud storage account — Google Drive, OneDrive, Dropbox, or S3.</div>
+          </div>
+          <table id="file-table" style="display:none">
+            <thead>
+              <tr>
+                <th class="col-name" onclick="sortBy('name')">Name <span class="sort-arrow" id="sort-name">▲</span></th>
+                <th class="col-size" onclick="sortBy('size')">Size <span class="sort-arrow" id="sort-size" style="display:none">▲</span></th>
+                <th class="col-type" onclick="sortBy('type')">Kind <span class="sort-arrow" id="sort-type" style="display:none">▲</span></th>
+                <th class="col-date" onclick="sortBy('date')">Modified <span class="sort-arrow" id="sort-date" style="display:none">▲</span></th>
+                <th class="col-acct" title="Account">Acct</th>
+              </tr>
+            </thead>
+            <tbody id="file-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- TRANSFER QUEUE -->
+      <div id="queue-panel">
+        <div id="queue-header" onclick="toggleQueue()">
+          <span>Transfers</span>
+          <span id="queue-count" style="font-size:11px;color:var(--muted);margin-right:8px">0 items</span>
+          <span id="queue-chevron" style="color:var(--muted);font-size:12px">▲</span>
+        </div>
+        <div id="queue-body"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- STATUS BAR -->
+  <div id="statusbar">
+    <span id="stat-items">Ready</span>
+    <span id="stat-selected" style="display:none"></span>
+    <span style="margin-left:auto;display:flex;gap:12px">
+      <span id="stat-provider"></span>
+      <span id="stat-path"></span>
+    </span>
+  </div>
+</div>
+
+<!-- DROP OVERLAY -->
+<div id="drop-overlay"><div class="drop-msg">Drop files to upload</div></div>
+
+<!-- ════ MODAL: NEW CONNECTION ════ -->
+<div class="overlay" id="modal-conn">
+  <div class="modal" style="max-width:520px">
+    <div class="modal-head">
+      <h2>New Connection</h2>
+      <button class="modal-close" onclick="closeModal('modal-conn')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="type-grid" id="provider-grid">
+        <div class="type-card selected" onclick="selectProvider('googledrive')">
+          <div class="type-icon">🟡</div>
+          <div><div class="type-name">Google Drive</div><div class="type-desc">OAuth — no keys needed</div></div>
+        </div>
+        <div class="type-card" onclick="selectProvider('onedrive')">
+          <div class="type-icon">🔵</div>
+          <div><div class="type-name">OneDrive</div><div class="type-desc">Microsoft — OAuth login</div></div>
+        </div>
+        <div class="type-card" onclick="selectProvider('dropbox')">
+          <div class="type-icon">📦</div>
+          <div><div class="type-name">Dropbox</div><div class="type-desc">Bearer token from App Console</div></div>
+        </div>
+        <div class="type-card" onclick="selectProvider('s3')">
+          <div class="type-icon">🪣</div>
+          <div><div class="type-name">S3 / Backblaze</div><div class="type-desc">AWS S3 compatible storage</div></div>
+        </div>
+      </div>
+
+      <!-- Google Drive -->
+      <div id="pane-googledrive" class="tab-pane active">
+        <div class="field">
+          <label>Google OAuth Client ID</label>
+          <input id="gd-client-id" type="text" placeholder="xxxx.apps.googleusercontent.com" />
+          <div class="hint">Get from <a href="https://console.cloud.google.com/apis/credentials" target="_blank">Google Cloud Console</a>. Enable Drive API. Add <code>http://localhost</code> to Origins.</div>
+        </div>
+        <div class="field">
+          <label>Nickname (optional)</label>
+          <input id="gd-name" type="text" placeholder="My Google Drive" />
+        </div>
+      </div>
+
+      <!-- OneDrive -->
+      <div id="pane-onedrive" class="tab-pane">
+        <div class="field">
+          <label>Azure Application (Client) ID</label>
+          <input id="od-client-id" type="text" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
+          <div class="hint">Create a free app at <a href="https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank">Azure App Registrations</a>. Set redirect URI to this page URL with platform "SPA".</div>
+        </div>
+        <div class="field">
+          <label>Nickname (optional)</label>
+          <input id="od-name" type="text" placeholder="My OneDrive" />
+        </div>
+      </div>
+
+      <!-- Dropbox -->
+      <div id="pane-dropbox" class="tab-pane">
+        <div class="field">
+          <label>Access Token</label>
+          <input id="dbx-token" type="password" placeholder="sl.xxxxxxxxxxxxxxxxxxxx..." />
+          <div class="hint">Go to <a href="https://www.dropbox.com/developers/apps" target="_blank">Dropbox App Console</a> → Create App → Generate access token. Choose "Full Dropbox" scope.</div>
+        </div>
+        <div class="field">
+          <label>Nickname (optional)</label>
+          <input id="dbx-name" type="text" placeholder="My Dropbox" />
+        </div>
+      </div>
+
+      <!-- S3 -->
+      <div id="pane-s3" class="tab-pane">
+        <div class="field">
+          <label>Endpoint URL</label>
+          <input id="s3-endpoint" type="text" placeholder="https://s3.amazonaws.com or https://s3.us-west-004.backblazeb2.com" />
+        </div>
+        <div class="field">
+          <label>Bucket Name</label>
+          <input id="s3-bucket" type="text" placeholder="my-bucket" />
+        </div>
+        <div class="field">
+          <label>Access Key ID</label>
+          <input id="s3-key" type="text" placeholder="AKIAIOSFODNN7EXAMPLE" />
+        </div>
+        <div class="field">
+          <label>Secret Access Key</label>
+          <input id="s3-secret" type="password" placeholder="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" />
+        </div>
+        <div class="field">
+          <label>Region</label>
+          <input id="s3-region" type="text" placeholder="us-east-1" value="us-east-1" />
+        </div>
+        <div class="field">
+          <label>Nickname (optional)</label>
+          <input id="s3-name" type="text" placeholder="My S3 Bucket" />
+        </div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" onclick="closeModal('modal-conn')">Cancel</button>
+      <button class="btn btn-primary" onclick="connectBookmark()">Connect →</button>
+    </div>
+  </div>
+</div>
+
+<!-- ════ MODAL: NEW FOLDER ════ -->
+<div class="overlay" id="modal-folder">
+  <div class="modal" style="max-width:360px">
+    <div class="modal-head">
+      <h2>New Folder</h2>
+      <button class="modal-close" onclick="closeModal('modal-folder')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>Folder Name</label>
+        <input id="folder-name-input" type="text" placeholder="Untitled Folder" onkeydown="if(event.key==='Enter')createFolder()" />
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" onclick="closeModal('modal-folder')">Cancel</button>
+      <button class="btn btn-primary" onclick="createFolder()">Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- ════ MODAL: RENAME ════ -->
+<div class="overlay" id="modal-rename">
+  <div class="modal" style="max-width:360px">
+    <div class="modal-head">
+      <h2>Rename</h2>
+      <button class="modal-close" onclick="closeModal('modal-rename')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>New Name</label>
+        <input id="rename-input" type="text" onkeydown="if(event.key==='Enter')doRename()" />
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" onclick="closeModal('modal-rename')">Cancel</button>
+      <button class="btn btn-primary" onclick="doRename()">Rename</button>
+    </div>
+  </div>
+</div>
+
+<!-- ════ MODAL: CONFIRM DELETE ════ -->
+<div class="overlay" id="modal-delete">
+  <div class="modal" style="max-width:380px">
+    <div class="modal-head">
+      <h2>Delete Files</h2>
+      <button class="modal-close" onclick="closeModal('modal-delete')">✕</button>
+    </div>
+    <div class="modal-body">
+      <p id="delete-msg" style="color:var(--muted);font-size:13px;line-height:1.6"></p>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" onclick="closeModal('modal-delete')">Cancel</button>
+      <button class="btn btn-danger" id="confirm-delete-btn">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- CONTEXT MENU -->
+<div id="ctx-menu">
+  <button class="ctx-item" onclick="ctxDownload()">↓ Download</button>
+  <button class="ctx-item" onclick="ctxRename()">✎ Rename</button>
+  <div class="ctx-sep"></div>
+  <button class="ctx-item" onclick="ctxNewFolder()">📁 New Folder Here</button>
+  <div class="ctx-sep"></div>
+  <button class="ctx-item danger" onclick="ctxDelete()">🗑 Delete</button>
+</div>
+
+<!-- TOAST CONTAINER -->
+<div id="toasts"></div>
+
+<!-- HIDDEN FILE INPUT -->
+<input type="file" id="file-input" multiple style="display:none" onchange="handleFileInput(this.files)" />
+
+<!-- GOOGLE APIS -->
+<script src="https://apis.google.com/js/api.js"></script>
+
+<script>
+// ═══════════════════════════════════════════════════════
+//  STATE
+// ═══════════════════════════════════════════════════════
+const State = {
+  bookmarks: JSON.parse(localStorage.getItem('clouduck_bm') || '[]'),
+  activeBookmark: null,
+  provider: null,
+  files: [],           // raw from provider
+  filtered: [],        // displayed
+  selected: new Set(), // selected file ids
+  history: [],
+  historyIdx: -1,
+  sortKey: 'name',
+  sortAsc: true,
+  transfers: [],
+  currentFolderId: 'root',
+  currentPath: [],     // [{id, name}]
+  filterText: '',
+};
+
+function saveBookmarks() {
+  localStorage.setItem('clouduck_bm', JSON.stringify(State.bookmarks));
+}
+
+// ═══════════════════════════════════════════════════════
+//  PROVIDERS
+// ═══════════════════════════════════════════════════════
+
+// ── Google Drive ─────────────────────────────────────
+const GDriveProvider = {
+  name: 'Google Drive',
+  color: '#fbbc04',
+  icon: '🟡',
+  token: null,
+  gapiReady: false,
+  gisReady: false,
+
+  async init(config) {
+    this.clientId = config.clientId;
+    await this._loadGAPI();
+    await this._loadGIS();
+  },
+
+  _loadGAPI() {
+    return new Promise(res => {
+      gapi.load('client', async () => {
+        await gapi.client.init({ discoveryDocs: ['https://www.googleapis.com/discovery/v1/apis/drive/v3/rest'] });
+        this.gapiReady = true; res();
+      });
+    });
+  },
+
+  _loadGIS() {
+    return new Promise(res => {
+      if (window.google?.accounts) { this.gisReady = true; res(); return; }
+      const s = document.createElement('script');
+      s.src = 'https://accounts.google.com/gsi/client';
+      s.onload = () => { this.gisReady = true; res(); };
+      document.head.appendChild(s);
+    });
+  },
+
+  connect() {
+    return new Promise((resolve, reject) => {
+      const tc = google.accounts.oauth2.initTokenClient({
+        client_id: this.clientId,
+        scope: 'https://www.googleapis.com/auth/drive',
+        callback: async (resp) => {
+          if (resp.error) { reject(new Error(resp.error)); return; }
+          this.token = resp.access_token;
+          gapi.client.setToken({ access_token: this.token });
+          try {
+            const r = await gapi.client.drive.about.get({ fields: 'user' });
+            this.userEmail = r.result.user.emailAddress;
+            resolve({ email: this.userEmail });
+          } catch(e) { reject(e); }
+        }
+      });
+      tc.requestAccessToken({ prompt: 'select_account' });
+    });
+  },
+
+  async listFiles(folderId = 'root') {
+    gapi.client.setToken({ access_token: this.token });
+    let all = [], pt = null;
+    do {
+      const p = { q: `'${folderId}' in parents and trashed=false`, pageSize: 200,
+        fields: 'nextPageToken,files(id,name,mimeType,size,modifiedTime,starred,webViewLink,webContentLink)', orderBy: 'folder,name' };
+      if (pt) p.pageToken = pt;
+      const r = await gapi.client.drive.files.list(p);
+      all = all.concat(r.result.files || []);
+      pt = r.result.nextPageToken;
+    } while(pt && all.length < 2000);
+    return all.map(f => ({
+      id: f.id, name: f.name, isFolder: f.mimeType === 'application/vnd.google-apps.folder',
+      size: parseInt(f.size) || 0, mimeType: f.mimeType, modified: f.modifiedTime,
+      webViewLink: f.webViewLink, webContentLink: f.webContentLink, raw: f
+    }));
+  },
+
+  async download(file) {
+    if (file.webContentLink) { window.open(file.webContentLink, '_blank'); return; }
+    if (file.webViewLink) { window.open(file.webViewLink, '_blank'); return; }
+    toast('Cannot download Google Docs — opening in browser', 'info');
+  },
+
+  async upload(folderId, file, onProgress) {
+    const metadata = { name: file.name, parents: [folderId] };
+    const form = new FormData();
+    form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
+    form.append('file', file);
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.upload.onprogress = e => e.lengthComputable && onProgress(e.loaded / e.total * 100);
+      xhr.onload = () => xhr.status < 300 ? resolve(JSON.parse(xhr.response)) : reject(new Error(xhr.statusText));
+      xhr.onerror = reject;
+      xhr.open('POST', 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart');
+      xhr.setRequestHeader('Authorization', 'Bearer ' + this.token);
+      xhr.send(form);
+    });
+  },
+
+  async createFolder(parentId, name) {
+    gapi.client.setToken({ access_token: this.token });
+    const r = await gapi.client.drive.files.create({ resource: { name, mimeType: 'application/vnd.google-apps.folder', parents: [parentId] }, fields: 'id,name' });
+    return r.result;
+  },
+
+  async delete(file) {
+    gapi.client.setToken({ access_token: this.token });
+    await gapi.client.drive.files.delete({ fileId: file.id });
+  },
+
+  async rename(file, newName) {
+    gapi.client.setToken({ access_token: this.token });
+    await gapi.client.drive.files.update({ fileId: file.id, resource: { name: newName } });
+  }
+};
+
+// ── OneDrive (Microsoft Graph) ───────────────────────
+const OneDriveProvider = {
+  name: 'OneDrive',
+  color: '#0078d4',
+  icon: '🔵',
+  token: null,
+
+  async init(config) {
+    this.clientId = config.clientId;
+    await this._loadMSAL();
+    this.msalApp = new msal.PublicClientApplication({
+      auth: { clientId: this.clientId, redirectUri: location.origin + location.pathname }
+    });
+  },
+
+  _loadMSAL() {
+    return new Promise((res, rej) => {
+      if (window.msal) { res(); return; }
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.27.0/lib/msal-browser.min.js';
+      s.onload = res; s.onerror = rej;
+      document.head.appendChild(s);
+    });
+  },
+
+  async connect() {
+    const scopes = ['Files.ReadWrite', 'User.Read'];
+    try {
+      const r = await this.msalApp.loginPopup({ scopes });
+      const tr = await this.msalApp.acquireTokenSilent({ scopes, account: r.account });
+      this.token = tr.accessToken;
+      this.account = r.account;
+      return { email: r.account.username };
+    } catch(e) {
+      const r = await this.msalApp.acquireTokenPopup({ scopes });
+      this.token = r.accessToken;
+      return { email: r.account.username };
+    }
+  },
+
+  async _graph(path, opts = {}) {
+    const resp = await fetch('https://graph.microsoft.com/v1.0' + path, {
+      ...opts, headers: { Authorization: 'Bearer ' + this.token, 'Content-Type': 'application/json', ...(opts.headers || {}) }
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    return opts.raw ? resp : resp.json();
+  },
+
+  async listFiles(folderId = 'root') {
+    const path = folderId === 'root' ? '/me/drive/root/children' : `/me/drive/items/${folderId}/children`;
+    const r = await this._graph(path + '?$top=500&$select=id,name,folder,size,lastModifiedDateTime,file,@microsoft.graph.downloadUrl');
+    return (r.value || []).map(f => ({
+      id: f.id, name: f.name, isFolder: !!f.folder,
+      size: f.size || 0, mimeType: f.file?.mimeType || 'folder',
+      modified: f.lastModifiedDateTime, downloadUrl: f['@microsoft.graph.downloadUrl']
+    }));
+  },
+
+  async download(file) {
+    if (file.downloadUrl) window.open(file.downloadUrl, '_blank');
+    else { const r = await this._graph(`/me/drive/items/${file.id}`); window.open(r['@microsoft.graph.downloadUrl'], '_blank'); }
+  },
+
+  async upload(folderId, file, onProgress) {
+    const path = folderId === 'root' ? `/me/drive/root:/${file.name}:/content` : `/me/drive/items/${folderId}:/${file.name}:/content`;
+    return this._graph(path, { method: 'PUT', body: file });
+  },
+
+  async createFolder(parentId, name) {
+    const path = parentId === 'root' ? '/me/drive/root/children' : `/me/drive/items/${parentId}/children`;
+    return this._graph(path, { method: 'POST', body: JSON.stringify({ name, folder: {}, '@microsoft.graph.conflictBehavior': 'rename' }) });
+  },
+
+  async delete(file) {
+    await this._graph(`/me/drive/items/${file.id}`, { method: 'DELETE', raw: true });
+  },
+
+  async rename(file, newName) {
+    await this._graph(`/me/drive/items/${file.id}`, { method: 'PATCH', body: JSON.stringify({ name: newName }) });
+  }
+};
+
+// ── Dropbox ──────────────────────────────────────────
+const DropboxProvider = {
+  name: 'Dropbox',
+  color: '#0061ff',
+  icon: '📦',
+
+  async init(config) { this.token = config.token; },
+  async connect() {
+    const r = await this._api('users/get_current_account', {});
+    return { email: r.email };
+  },
+
+  async _api(endpoint, body) {
+    const r = await fetch('https://api.dropboxapi.com/2/' + endpoint, {
+      method: 'POST', headers: { Authorization: 'Bearer ' + this.token, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (!r.ok) throw new Error(await r.text());
+    return r.status === 200 ? r.json() : null;
+  },
+
+  async listFiles(path = '') {
+    const r = await this._api('files/list_folder', { path: path === 'root' ? '' : path, limit: 500 });
+    const mapper = f => ({
+      id: f.path_lower, name: f.name, isFolder: f['.tag'] === 'folder',
+      size: f.size || 0, mimeType: f.is_downloadable ? 'file' : 'folder',
+      modified: f.client_modified, path: f.path_lower
+    });
+    let entries = (r.entries || []).map(mapper);
+    let cursor = r.cursor, hasMore = r.has_more;
+    while(hasMore) {
+      const c = await this._api('files/list_folder/continue', { cursor });
+      entries = entries.concat((c.entries || []).map(mapper));
+      cursor = c.cursor; hasMore = c.has_more;
+    }
+    return entries;
+  },
+
+  async download(file) {
+    const r = await fetch('https://content.dropboxapi.com/2/files/download', {
+      method: 'POST', headers: { Authorization: 'Bearer ' + this.token, 'Dropbox-API-Arg': JSON.stringify({ path: file.path }) }
+    });
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = file.name; a.click(); URL.revokeObjectURL(url);
+  },
+
+  async upload(folderId, file, onProgress) {
+    const path = (folderId === 'root' ? '' : folderId) + '/' + file.name;
+    const r = await fetch('https://content.dropboxapi.com/2/files/upload', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + this.token, 'Content-Type': 'application/octet-stream', 'Dropbox-API-Arg': JSON.stringify({ path, mode: 'add', autorename: true }) },
+      body: file
+    });
+    onProgress(100);
+    return r.json();
+  },
+
+  async createFolder(parentId, name) {
+    const path = (parentId === 'root' ? '' : parentId) + '/' + name;
+    return this._api('files/create_folder_v2', { path, autorename: false });
+  },
+
+  async delete(file) { await this._api('files/delete_v2', { path: file.path }); },
+
+  async rename(file, newName) {
+    const newPath = file.path.replace(/\/[^/]+$/, '/') + newName;
+    await this._api('files/move_v2', { from_path: file.path, to_path: newPath });
+  }
+};
+
+// ── S3 Compatible ────────────────────────────────────
+const S3Provider = {
+  name: 'S3',
+  color: '#ff9900',
+  icon: '🪣',
+
+  async init(config) {
+    this.endpoint = config.endpoint.replace(/\/$/, '');
+    this.bucket = config.bucket;
+    this.accessKey = config.accessKey;
+    this.secretKey = config.secretKey;
+    this.region = config.region || 'us-east-1';
+  },
+
+  async connect() { await this.listFiles('root'); return { email: this.bucket }; },
+
+  async listFiles(prefix = 'root') {
+    const p = prefix === 'root' ? '' : prefix;
+    const url = `${this.endpoint}/${this.bucket}?list-type=2&delimiter=/&prefix=${encodeURIComponent(p)}&max-keys=1000`;
+    const headers = await this._sign('GET', `/${this.bucket}`, { 'list-type': '2', delimiter: '/', prefix: p, 'max-keys': '1000' });
+    const r = await fetch(url, { headers });
+    if (!r.ok) throw new Error(await r.text());
+    const xml = new DOMParser().parseFromString(await r.text(), 'text/xml');
+    const files = [];
+    xml.querySelectorAll('Contents').forEach(n => {
+      const key = n.querySelector('Key')?.textContent || '';
+      const name = key.replace(p, '').replace(/\/$/, '') || key;
+      if (!name || name === p) return;
+      files.push({ id: key, name, isFolder: false, size: parseInt(n.querySelector('Size')?.textContent || 0), mimeType: 'file', modified: n.querySelector('LastModified')?.textContent, path: key });
+    });
+    xml.querySelectorAll('CommonPrefixes Prefix').forEach(n => {
+      const key = n.textContent || '';
+      const name = key.replace(p, '').replace(/\/$/, '');
+      if (!name) return;
+      files.push({ id: key, name, isFolder: true, size: 0, mimeType: 'folder', modified: '', path: key });
+    });
+    return files;
+  },
+
+  async download(file) {
+    const url = `${this.endpoint}/${this.bucket}/${file.path}`;
+    window.open(url, '_blank');
+  },
+
+  async upload(prefix, file, onProgress) {
+    const key = (prefix === 'root' ? '' : prefix) + file.name;
+    const url = `${this.endpoint}/${this.bucket}/${key}`;
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.upload.onprogress = e => e.lengthComputable && onProgress(e.loaded / e.total * 100);
+      xhr.onload = () => xhr.status < 300 ? resolve() : reject(new Error(xhr.statusText));
+      xhr.onerror = reject;
+      xhr.open('PUT', url);
+      xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+      xhr.send(file);
+    });
+  },
+
+  async createFolder(parentId, name) {
+    const key = (parentId === 'root' ? '' : parentId) + name + '/';
+    const url = `${this.endpoint}/${this.bucket}/${key}`;
+    const r = await fetch(url, { method: 'PUT', headers: { 'Content-Length': '0' } });
+    if (!r.ok) throw new Error(await r.text());
+  },
+
+  async delete(file) {
+    const url = `${this.endpoint}/${this.bucket}/${file.path}`;
+    await fetch(url, { method: 'DELETE' });
+  },
+
+  async rename(file, newName) { toast('S3 rename: delete + re-upload required', 'info'); },
+
+  async _sign(method, path, queryParams = {}) {
+    // Minimal HMAC-SHA256 signing using SubtleCrypto
+    const now = new Date();
+    const dateStr = now.toISOString().replace(/[:-]|\.\d{3}/g, '').slice(0, 15) + 'Z';
+    const dateShort = dateStr.slice(0, 8);
+    const host = new URL(this.endpoint).host;
+    const scope = `${dateShort}/${this.region}/s3/aws4_request`;
+    const qs = Object.entries(queryParams).sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>`${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
+    const canonicalHeaders = `host:${host}\nx-amz-date:${dateStr}\n`;
+    const signedHeaders = 'host;x-amz-date';
+    const canonical = [method, path, qs, canonicalHeaders, signedHeaders, 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'].join('\n');
+    const strToSign = ['AWS4-HMAC-SHA256', dateStr, scope, await sha256(canonical)].join('\n');
+    const key = await deriveKey(this.secretKey, dateShort, this.region);
+    const sig = await hmacHex(key, strToSign);
+    return { 'x-amz-date': dateStr, 'Authorization': `AWS4-HMAC-SHA256 Credential=${this.accessKey}/${scope},SignedHeaders=${signedHeaders},Signature=${sig}` };
+  }
+};
+
+async function sha256(msg) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(msg));
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+async function hmacRaw(key, data) {
+  const k = typeof key === 'string' ? new TextEncoder().encode('AWS4' + key) : key;
+  const ck = await crypto.subtle.importKey('raw', k, {name:'HMAC',hash:'SHA-256'}, false, ['sign']);
+  return new Uint8Array(await crypto.subtle.sign('HMAC', ck, new TextEncoder().encode(data)));
+}
+async function hmacHex(key, data) {
+  const raw = await hmacRaw(key, data);
+  return Array.from(raw).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+async function deriveKey(secret, date, region) {
+  let k = await hmacRaw(secret, date);
+  k = await hmacRaw(k, region);
+  k = await hmacRaw(k, 's3');
+  k = await hmacRaw(k, 'aws4_request');
+  return k;
+}
+
+// ═══════════════════════════════════════════════════════
+//  CONNECTION MODAL
+// ═══════════════════════════════════════════════════════
+let selectedProvider = 'googledrive';
+
+function openNewConn() { openModal('modal-conn'); }
+
+function selectProvider(type) {
+  selectedProvider = type;
+  document.querySelectorAll('.type-card').forEach(c => c.classList.remove('selected'));
+  event.currentTarget.classList.add('selected');
+  ['googledrive','onedrive','dropbox','s3'].forEach(t => {
+    const p = document.getElementById('pane-' + t);
+    if (p) p.classList.toggle('active', t === type);
+  });
+}
+
+async function connectBookmark() {
+  const type = selectedProvider;
+  let config = {}, name = '';
+
+  if (type === 'googledrive') {
+    config.clientId = document.getElementById('gd-client-id').value.trim();
+    name = document.getElementById('gd-name').value.trim() || 'Google Drive';
+    if (!config.clientId) { toast('Client ID required', 'error'); return; }
+  } else if (type === 'onedrive') {
+    config.clientId = document.getElementById('od-client-id').value.trim();
+    name = document.getElementById('od-name').value.trim() || 'OneDrive';
+    if (!config.clientId) { toast('Client ID required', 'error'); return; }
+  } else if (type === 'dropbox') {
+    config.token = document.getElementById('dbx-token').value.trim();
+    name = document.getElementById('dbx-name').value.trim() || 'Dropbox';
+    if (!config.token) { toast('Access token required', 'error'); return; }
+  } else if (type === 's3') {
+    config.endpoint = document.getElementById('s3-endpoint').value.trim();
+    config.bucket = document.getElementById('s3-bucket').value.trim();
+    config.accessKey = document.getElementById('s3-key').value.trim();
+    config.secretKey = document.getElementById('s3-secret').value.trim();
+    config.region = document.getElementById('s3-region').value.trim() || 'us-east-1';
+    name = document.getElementById('s3-name').value.trim() || config.bucket || 'S3 Bucket';
+    if (!config.endpoint || !config.bucket) { toast('Endpoint and bucket required', 'error'); return; }
+  }
+
+  const bm = { id: Date.now().toString(), type, name, config, color: {googledrive:'#fbbc04',onedrive:'#0078d4',dropbox:'#0061ff',s3:'#ff9900'}[type] };
+  State.bookmarks.push(bm);
+  saveBookmarks();
+  closeModal('modal-conn');
+  renderBookmarks();
+  await openBookmark(bm);
+}
+
+// ═══════════════════════════════════════════════════════
+//  BOOKMARK MANAGEMENT
+// ═══════════════════════════════════════════════════════
+const PROVIDERS = { googledrive: GDriveProvider, onedrive: OneDriveProvider, dropbox: DropboxProvider, s3: S3Provider };
+
+async function openBookmark(bm) {
+  State.activeBookmark = bm;
+  renderBookmarks();
+  showLoading('Connecting to ' + bm.name + '…');
+
+  try {
+    const pProto = PROVIDERS[bm.type];
+    // Create fresh instance
+    const p = Object.create(pProto);
+    await p.init(bm.config);
+    const info = await p.connect();
+    State.provider = p;
+    State.currentFolderId = 'root';
+    State.currentPath = [];
+    State.history = ['root'];
+    State.historyIdx = 0;
+    bm.email = info.email;
+    saveBookmarks();
+    renderBookmarks();
+    document.getElementById('stat-provider').textContent = bm.name + (info.email ? ' · ' + info.email : '');
+    toast('Connected to ' + bm.name, 'success');
+    await loadFiles('root');
+  } catch(e) {
+    console.error(e);
+    toast('Connection failed: ' + e.message, 'error');
+    showEmpty();
+  }
+}
+
+function removeBookmark(id, e) {
+  e.stopPropagation();
+  State.bookmarks = State.bookmarks.filter(b => b.id !== id);
+  saveBookmarks();
+  renderBookmarks();
+  if (State.activeBookmark?.id === id) { State.activeBookmark = null; State.provider = null; showEmpty(); }
+}
+
+function renderBookmarks() {
+  const c = document.getElementById('bookmark-list');
+  if (!State.bookmarks.length) { c.innerHTML = ''; return; }
+  c.innerHTML = State.bookmarks.map(bm => `
+    <div class="bookmark-item ${State.activeBookmark?.id === bm.id ? 'active' : ''}" onclick="openBookmark(${JSON.stringify(bm).replace(/"/g,'&quot;')})">
+      <div class="bm-icon" style="background:${bm.color}22;color:${bm.color}">${{googledrive:'🟡',onedrive:'🔵',dropbox:'📦',s3:'🪣'}[bm.type]}</div>
+      <div class="bm-info">
+        <div class="bm-name">${esc(bm.name)}</div>
+        <div class="bm-host">${esc(bm.email || bm.type)}</div>
+      </div>
+      <button class="bm-remove" onclick="removeBookmark('${bm.id}',event)" title="Remove">✕</button>
+    </div>
+  `).join('');
+}
+
+// ═══════════════════════════════════════════════════════
+//  FILE LOADING & RENDERING
+// ═══════════════════════════════════════════════════════
+async function loadFiles(folderId) {
+  showLoading('Loading…');
+  State.selected.clear();
+  State.currentFolderId = folderId;
+  document.getElementById('addressbar').value = buildPath();
+
+  try {
+    State.files = await State.provider.listFiles(folderId);
+    applySort();
+    renderFiles();
+    updateStatus();
+  } catch(e) {
+    console.error(e);
+    toast('Error loading files: ' + e.message, 'error');
+    showEmpty('Failed to load — ' + e.message);
+  }
+}
+
+function applySort() {
+  const key = State.sortKey, asc = State.sortAsc;
+  State.filtered = [...State.files].filter(f => !State.filterText || f.name.toLowerCase().includes(State.filterText));
+  State.filtered.sort((a, b) => {
+    if (a.isFolder !== b.isFolder) return a.isFolder ? -1 : 1;
+    let va = a[key] ?? '', vb = b[key] ?? '';
+    if (key === 'size') { va = +va; vb = +vb; }
+    if (key === 'date') { va = new Date(va||0); vb = new Date(vb||0); }
+    return asc ? (va < vb ? -1 : va > vb ? 1 : 0) : (va > vb ? -1 : va < vb ? 1 : 0);
+  });
+}
+
+function renderFiles() {
+  const tbody = document.getElementById('file-tbody');
+  document.getElementById('file-table').style.display = '';
+  document.getElementById('empty-state').style.display = 'none';
+
+  if (!State.filtered.length) {
+    tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:40px;color:var(--muted)">Empty folder</td></tr>`;
+    return;
+  }
+
+  const bm = State.activeBookmark;
+  tbody.innerHTML = State.filtered.map(f => `
+    <tr data-id="${esc(f.id)}"
+      ondblclick="onDblClick('${esc(f.id)}')"
+      onclick="onRowClick(event,'${esc(f.id)}')"
+      oncontextmenu="onRowCtx(event,'${esc(f.id)}')">
+      <td class="col-name">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="file-icon">${fileIcon(f)}</span>
+          <span class="file-name ${f.isFolder?'folder':''}">${esc(f.name)}</span>
+        </div>
+      </td>
+      <td class="col-size" style="text-align:right;font-family:var(--mono);font-size:12px;color:var(--muted)">${f.isFolder ? '—' : fmtSize(f.size)}</td>
+      <td class="col-type" style="color:var(--muted);font-size:12px">${f.isFolder ? 'Folder' : mimeLabel(f.mimeType)}</td>
+      <td class="col-date" style="font-family:var(--mono);font-size:11px;color:var(--muted)">${fmtDate(f.modified)}</td>
+      <td class="col-acct" style="text-align:center"><span class="acct-pill" style="background:${bm?.color||'#888'}" title="${esc(bm?.name||'')}"></span></td>
+    </tr>
+  `).join('');
+}
+
+// ═══════════════════════════════════════════════════════
+//  ROW INTERACTIONS
+// ═══════════════════════════════════════════════════════
+function onRowClick(e, id) {
+  if (e.ctrlKey || e.metaKey) {
+    State.selected.has(id) ? State.selected.delete(id) : State.selected.add(id);
+  } else if (e.shiftKey && State.selected.size) {
+    const ids = State.filtered.map(f => f.id);
+    const last = [...State.selected].at(-1);
+    const i = ids.indexOf(last), j = ids.indexOf(id);
+    const [s, en] = [Math.min(i,j), Math.max(i,j)];
+    ids.slice(s, en+1).forEach(fid => State.selected.add(fid));
+  } else {
+    State.selected.clear();
+    State.selected.add(id);
+  }
+  document.querySelectorAll('#file-tbody tr').forEach(tr => {
+    tr.classList.toggle('selected', State.selected.has(tr.dataset.id));
+  });
+  updateStatus();
+}
+
+function onDblClick(id) {
+  const file = State.filtered.find(f => f.id === id);
+  if (!file) return;
+  if (file.isFolder) {
+    State.currentPath.push({ id: State.currentFolderId, name: State.currentPath.length === 0 ? (State.activeBookmark?.name || 'Root') : State.currentPath.at(-1)?.name });
+    navigateTo(file.id, file.name);
+  } else {
+    State.provider.download(file).catch(e => toast(e.message, 'error'));
+  }
+}
+
+let ctxFileId = null;
+function onRowCtx(e, id) {
+  e.preventDefault();
+  ctxFileId = id;
+  State.selected.clear(); State.selected.add(id);
+  document.querySelectorAll('#file-tbody tr').forEach(tr => tr.classList.toggle('selected', tr.dataset.id === id));
+  const menu = document.getElementById('ctx-menu');
+  menu.style.display = 'block';
+  menu.style.left = Math.min(e.clientX, innerWidth - 200) + 'px';
+  menu.style.top = Math.min(e.clientY, innerHeight - 160) + 'px';
+}
+
+document.addEventListener('click', () => { document.getElementById('ctx-menu').style.display = 'none'; });
+
+function ctxDownload() { const f = State.filtered.find(x => x.id === ctxFileId); if (f) State.provider.download(f); }
+function ctxRename() { const f = State.filtered.find(x => x.id === ctxFileId); if (f) promptRename(f); }
+function ctxDelete() { deleteSelected(); }
+function ctxNewFolder() { promptNewFolder(); }
+
+// ═══════════════════════════════════════════════════════
+//  NAVIGATION
+// ═══════════════════════════════════════════════════════
+function navigateTo(folderId, folderName) {
+  // Push to history
+  State.history = State.history.slice(0, State.historyIdx + 1);
+  State.history.push(folderId);
+  State.historyIdx++;
+  loadFiles(folderId);
+  if (folderName) State.currentPath.push({ id: folderId, name: folderName });
+  renderBreadcrumb();
+}
+
+function goBack() {
+  if (State.historyIdx <= 0) return;
+  State.historyIdx--;
+  const id = State.history[State.historyIdx];
+  if (State.currentPath.length) State.currentPath.pop();
+  loadFiles(id);
+  renderBreadcrumb();
+}
+
+function goForward() {
+  if (State.historyIdx >= State.history.length - 1) return;
+  State.historyIdx++;
+  loadFiles(State.history[State.historyIdx]);
+}
+
+function reload() { loadFiles(State.currentFolderId); }
+
+function navigateCrumb(idx) {
+  if (idx === -1) { State.currentPath = []; State.historyIdx = 0; loadFiles('root'); renderBreadcrumb(); return; }
+  const crumb = State.currentPath[idx];
+  State.currentPath = State.currentPath.slice(0, idx);
+  loadFiles(crumb.id);
+  renderBreadcrumb();
+}
+
+function renderBreadcrumb() {
+  const bc = document.getElementById('breadcrumb');
+  const name = State.activeBookmark?.name || 'Storage';
+  let html = `<span class="crumb" onclick="navigateCrumb(-1)">${esc(name)}</span>`;
+  State.currentPath.forEach((p, i) => {
+    html += `<span class="crumb-sep">›</span>`;
+    if (i === State.currentPath.length - 1) html += `<span class="crumb current">${esc(p.name)}</span>`;
+    else html += `<span class="crumb" onclick="navigateCrumb(${i})">${esc(p.name)}</span>`;
+  });
+  bc.innerHTML = html;
+  document.getElementById('addressbar').value = buildPath();
+  document.getElementById('stat-path').textContent = buildPath();
+}
+
+function buildPath() {
+  return '/' + State.currentPath.map(p => p.name).join('/');
+}
+
+// ═══════════════════════════════════════════════════════
+//  FILE OPERATIONS
+// ═══════════════════════════════════════════════════════
+async function downloadSelected() {
+  if (!State.provider) { toast('Not connected', 'error'); return; }
+  const files = State.filtered.filter(f => State.selected.has(f.id) && !f.isFolder);
+  if (!files.length) { toast('Select files to download', 'info'); return; }
+  for (const f of files) {
+    const tid = addTransfer(f.name, 'download');
+    try { await State.provider.download(f); updateTransfer(tid, 100, 'done'); } catch(e) { updateTransfer(tid, 0, 'error'); toast(e.message, 'error'); }
+  }
+}
+
+function promptNewFolder() {
+  if (!State.provider) { toast('Not connected', 'error'); return; }
+  document.getElementById('folder-name-input').value = '';
+  openModal('modal-folder');
+  setTimeout(() => document.getElementById('folder-name-input').focus(), 100);
+}
+
+async function createFolder() {
+  const name = document.getElementById('folder-name-input').value.trim();
+  if (!name) return;
+  closeModal('modal-folder');
+  try {
+    await State.provider.createFolder(State.currentFolderId, name);
+    toast('Folder created', 'success');
+    reload();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+function deleteSelected() {
+  if (!State.provider) return;
+  const files = State.filtered.filter(f => State.selected.has(f.id));
+  if (!files.length) { toast('Select files to delete', 'info'); return; }
+  document.getElementById('delete-msg').textContent = `Delete ${files.length} item(s)? This cannot be undone.`;
+  document.getElementById('confirm-delete-btn').onclick = async () => {
+    closeModal('modal-delete');
+    for (const f of files) {
+      try { await State.provider.delete(f); } catch(e) { toast('Delete failed: ' + e.message, 'error'); }
+    }
+    toast(`Deleted ${files.length} item(s)`, 'success');
+    reload();
+  };
+  openModal('modal-delete');
+}
+
+let renameTarget = null;
+function promptRename(file) {
+  renameTarget = file;
+  document.getElementById('rename-input').value = file.name;
+  openModal('modal-rename');
+  setTimeout(() => { const i = document.getElementById('rename-input'); i.focus(); i.select(); }, 100);
+}
+
+async function doRename() {
+  const newName = document.getElementById('rename-input').value.trim();
+  if (!newName || !renameTarget) return;
+  closeModal('modal-rename');
+  try {
+    await State.provider.rename(renameTarget, newName);
+    toast('Renamed successfully', 'success');
+    reload();
+  } catch(e) { toast('Rename failed: ' + e.message, 'error'); }
+}
+
+// ═══════════════════════════════════════════════════════
+//  UPLOAD
+// ═══════════════════════════════════════════════════════
+function triggerUpload() {
+  if (!State.provider) { toast('Connect to a storage first', 'error'); return; }
+  document.getElementById('file-input').click();
+}
+
+async function handleFileInput(files) {
+  for (const file of files) { await uploadFile(file); }
+  document.getElementById('file-input').value = '';
+  reload();
+}
+
+async function uploadFile(file) {
+  const tid = addTransfer(file.name, 'upload');
+  try {
+    await State.provider.upload(State.currentFolderId, file, pct => updateTransfer(tid, pct, 'running'));
+    updateTransfer(tid, 100, 'done');
+    toast('Uploaded ' + file.name, 'success');
+  } catch(e) {
+    updateTransfer(tid, 0, 'error');
+    toast('Upload failed: ' + e.message, 'error');
+  }
+}
+
+// Drag & drop
+document.addEventListener('dragover', e => { e.preventDefault(); if (State.provider) document.getElementById('drop-overlay').classList.add('active'); });
+document.addEventListener('dragleave', e => { if (!e.relatedTarget) document.getElementById('drop-overlay').classList.remove('active'); });
+document.addEventListener('drop', async e => {
+  e.preventDefault();
+  document.getElementById('drop-overlay').classList.remove('active');
+  if (!State.provider) { toast('Connect to a storage first', 'error'); return; }
+  const files = [...e.dataTransfer.files];
+  for (const file of files) await uploadFile(file);
+  reload();
+});
+
+// ═══════════════════════════════════════════════════════
+//  TRANSFER QUEUE
+// ═══════════════════════════════════════════════════════
+function addTransfer(name, direction) {
+  const id = Date.now().toString();
+  State.transfers.unshift({ id, name, direction, progress: 0, status: 'running' });
+  renderQueue();
+  return id;
+}
+
+function updateTransfer(id, progress, status) {
+  const t = State.transfers.find(x => x.id === id);
+  if (!t) return;
+  t.progress = progress; t.status = status;
+  renderQueue();
+}
+
+function renderQueue() {
+  const body = document.getElementById('queue-body');
+  document.getElementById('queue-count').textContent = State.transfers.length + ' item' + (State.transfers.length !== 1 ? 's' : '');
+  body.innerHTML = State.transfers.slice(0, 20).map(t => `
+    <div class="transfer-row">
+      <span class="tr-icon">${t.direction === 'upload' ? '↑' : '↓'}</span>
+      <div class="tr-info">
+        <div class="tr-name">${esc(t.name)}</div>
+        <div class="progress-bar"><div class="progress-fill ${t.status}" style="width:${t.progress}%"></div></div>
+        <div class="tr-status">${t.status === 'done' ? 'Complete' : t.status === 'error' ? 'Failed' : t.progress + '%'}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
+let queueCollapsed = false;
+function toggleQueue() {
+  queueCollapsed = !queueCollapsed;
+  document.getElementById('queue-panel').classList.toggle('collapsed', queueCollapsed);
+  document.getElementById('queue-chevron').textContent = queueCollapsed ? '▼' : '▲';
+}
+
+// ═══════════════════════════════════════════════════════
+//  SORT & FILTER
+// ═══════════════════════════════════════════════════════
+function sortBy(key) {
+  const keyMap = { name: 'name', size: 'size', type: 'mimeType', date: 'modified' };
+  const mapped = keyMap[key] || key;
+  if (State.sortKey === mapped) State.sortAsc = !State.sortAsc;
+  else { State.sortKey = mapped; State.sortAsc = true; }
+  ['name','size','type','date'].forEach(k => {
+    const el = document.getElementById('sort-' + k);
+    if (el) el.style.display = k === key ? '' : 'none';
+    if (el && k === key) el.textContent = State.sortAsc ? '▲' : '▼';
+  });
+  applySort(); renderFiles();
+}
+
+function filterFiles(text) {
+  State.filterText = text.toLowerCase();
+  applySort(); renderFiles();
+}
+
+// ═══════════════════════════════════════════════════════
+//  STATUS & UI STATE
+// ═══════════════════════════════════════════════════════
+function updateStatus() {
+  const sel = State.selected.size;
+  document.getElementById('stat-items').textContent = State.filtered.length + ' items';
+  const el = document.getElementById('stat-selected');
+  if (sel) { el.style.display = ''; el.textContent = sel + ' selected'; } else el.style.display = 'none';
+}
+
+function showLoading(msg) {
+  document.getElementById('file-table').style.display = 'none';
+  const es = document.getElementById('empty-state');
+  es.style.display = 'flex';
+  es.innerHTML = `<div class="spinner"></div><div style="color:var(--muted);font-size:13px">${msg}</div>`;
+}
+
+function showEmpty(msg) {
+  document.getElementById('file-table').style.display = 'none';
+  const es = document.getElementById('empty-state');
+  es.style.display = 'flex';
+  es.innerHTML = `<div class="state-icon">☁</div><div class="state-title">No connection</div><div class="state-sub">${msg || 'Select a bookmark or add a new connection.'}</div>`;
+}
+
+// ═══════════════════════════════════════════════════════
+//  MODAL HELPERS
+// ═══════════════════════════════════════════════════════
+function openModal(id) { document.getElementById(id).classList.add('open'); }
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+document.querySelectorAll('.overlay').forEach(el => el.addEventListener('click', e => { if (e.target === el) el.classList.remove('open'); }));
+
+// ═══════════════════════════════════════════════════════
+//  TOAST
+// ═══════════════════════════════════════════════════════
+function toast(msg, type = 'info') {
+  const c = document.getElementById('toasts');
+  const el = document.createElement('div');
+  el.className = 'toast ' + type;
+  const icons = { success: '✓', error: '✕', info: '·' };
+  el.innerHTML = `<span>${icons[type]||'·'}</span> ${esc(msg)}`;
+  c.appendChild(el);
+  setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; setTimeout(() => el.remove(), 300); }, 4000);
+}
+
+// ═══════════════════════════════════════════════════════
+//  UTILS
+// ═══════════════════════════════════════════════════════
+function fileIcon(f) {
+  if (f.isFolder) return '📁';
+  const m = f.mimeType || '';
+  if (m.includes('google-apps.document') || m.includes('wordprocessing') || m.includes('msword')) return '📝';
+  if (m.includes('spreadsheet') || m.includes('excel')) return '📊';
+  if (m.includes('presentation') || m.includes('powerpoint')) return '📑';
+  if (m.includes('pdf')) return '📕';
+  if (m.startsWith('image/')) return '🖼';
+  if (m.startsWith('video/')) return '🎬';
+  if (m.startsWith('audio/')) return '🎵';
+  if (m.includes('zip') || m.includes('tar') || m.includes('gz')) return '🗜';
+  if (m.includes('javascript') || m.includes('python') || m.includes('json') || m.includes('html') || m.includes('css') || m.includes('text/')) return '📄';
+  return '📄';
+}
+
+function mimeLabel(m) {
+  if (!m) return 'File';
+  if (m.includes('folder')) return 'Folder';
+  if (m.includes('google-apps.document')) return 'Google Doc';
+  if (m.includes('google-apps.spreadsheet')) return 'Google Sheet';
+  if (m.includes('google-apps.presentation')) return 'Google Slides';
+  if (m.includes('pdf')) return 'PDF';
+  if (m.startsWith('image/')) return 'Image';
+  if (m.startsWith('video/')) return 'Video';
+  if (m.startsWith('audio/')) return 'Audio';
+  if (m.startsWith('text/')) return 'Text';
+  if (m.includes('zip')) return 'Archive';
+  return m.split('/').pop().toUpperCase().slice(0,12);
+}
+
+function fmtSize(bytes) {
+  if (!bytes) return '—';
+  const b = +bytes;
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b/1024).toFixed(1) + ' KB';
+  if (b < 1073741824) return (b/1048576).toFixed(1) + ' MB';
+  return (b/1073741824).toFixed(2) + ' GB';
+}
+
+function fmtDate(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso), now = new Date(), diff = now - d;
+  if (diff < 60000) return 'Just now';
+  if (diff < 3600000) return Math.floor(diff/60000) + 'm ago';
+  if (diff < 86400000) return Math.floor(diff/3600000) + 'h ago';
+  if (diff < 604800000) return Math.floor(diff/86400000) + 'd ago';
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' });
+}
+
+function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function showHelp() { toast('Clouduck — Free Cyberduck-like cloud manager. Press / to filter files.', 'info'); }
+function showEditMenu() { toast('Select files and use toolbar buttons or right-click for options', 'info'); }
+
+// ─── KEYBOARD SHORTCUTS ──────────────────────────────
+document.addEventListener('keydown', e => {
+  if (e.key === 'F5' || (e.key === 'r' && (e.ctrlKey || e.metaKey))) { e.preventDefault(); if (State.provider) reload(); }
+  if (e.key === 'Backspace' && document.activeElement.tagName !== 'INPUT') { e.preventDefault(); goBack(); }
+  if (e.key === 'Delete') { if (document.activeElement.tagName !== 'INPUT') deleteSelected(); }
+  if (e.key === '/' && document.activeElement.tagName !== 'INPUT') { e.preventDefault(); document.getElementById('search-input').focus(); }
+  if (e.key === 'Escape') { document.getElementById('search-input').value = ''; filterFiles(''); document.getElementById('search-input').blur(); }
+  if (e.key === 'a' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); State.filtered.forEach(f => State.selected.add(f.id)); document.querySelectorAll('#file-tbody tr').forEach(tr => tr.classList.add('selected')); updateStatus(); }
+});
+
+// ─── INIT ────────────────────────────────────────────
+renderBookmarks();
+renderQueue();
+</script>
+</body>
+</html>
