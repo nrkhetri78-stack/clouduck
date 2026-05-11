@@ -497,118 +497,111 @@ td.name-cell{display:flex;align-items:center;gap:8px;max-width:none}
 <script src="https://apis.google.com/js/api.js"></script>
 
 <script>
-// ═══════════════════════════════════════════════════════
+<script>
+// ═══════════════════════════════════════════════════════════════
 //  STATE
-// ═══════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 const State = {
   bookmarks: JSON.parse(localStorage.getItem('clouduck_bm') || '[]'),
   activeBookmark: null,
   provider: null,
-  files: [],           // raw from provider
-  filtered: [],        // displayed
-  selected: new Set(), // selected file ids
-  history: [],
-  historyIdx: -1,
-  sortKey: 'name',
-  sortAsc: true,
+  files: [], filtered: [],
+  selected: new Set(),
+  history: [], historyIdx: -1,
+  sortKey: 'name', sortAsc: true,
   transfers: [],
   currentFolderId: 'root',
-  currentPath: [],     // [{id, name}]
+  currentPath: [],
   filterText: '',
 };
 
-function saveBookmarks() {
-  localStorage.setItem('clouduck_bm', JSON.stringify(State.bookmarks));
-}
+// ── Provider cache: keeps live provider instances so switching
+//    accounts never triggers OAuth again ──────────────────────
+// { [bookmarkId]: { provider, connected:bool, email } }
+const ProviderCache = {};
 
-// ═══════════════════════════════════════════════════════
+function saveBookmarks() { localStorage.setItem('clouduck_bm', JSON.stringify(State.bookmarks)); }
+
+// Token store: persist OAuth tokens across page reloads
+const TokenStore = {
+  key: (id) => 'cdk_tok_' + id,
+  save(bmId, data) { try { localStorage.setItem(this.key(bmId), JSON.stringify({ ...data, saved: Date.now() })); } catch(e){} },
+  load(bmId) { try { return JSON.parse(localStorage.getItem(this.key(bmId))); } catch(e){ return null; } },
+  clear(bmId) { localStorage.removeItem(this.key(bmId)); },
+  valid(bmId) {
+    const d = this.load(bmId);
+    if (!d) return false;
+    // Google tokens last 1hr, give 50min buffer
+    if (d.type === 'googledrive') return d.token && (Date.now() - d.saved) < 50 * 60 * 1000;
+    // MSAL tokens: check by trying silently (MSAL manages its own cache)
+    if (d.type === 'onedrive') return !!d.hasAccount;
+    // Dropbox/S3: creds stored in bookmark, always valid
+    return true;
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════
 //  PROVIDERS
-// ═══════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 
-// ── Google Drive ─────────────────────────────────────
+// ── Google Drive ─────────────────────────────────────────────
 const GDriveProvider = {
-  name: 'Google Drive',
-  color: '#fbbc04',
-  icon: '🟡',
-  token: null,
-  gapiReady: false,
-  gisReady: false,
+  name: 'Google Drive', color: '#fbbc04', icon: '🟡',
+  gapiLoaded: false, gisLoaded: false,
 
   async init(config) {
     this.clientId = config.clientId;
-    await this._loadGAPI();
-    await this._loadGIS();
-  },
-
-  _loadGAPI() {
-    return new Promise(res => {
-      gapi.load('client', async () => {
+    if (!this.gapiLoaded) {
+      await new Promise(res => gapi.load('client', async () => {
         await gapi.client.init({ discoveryDocs: ['https://www.googleapis.com/discovery/v1/apis/drive/v3/rest'] });
-        this.gapiReady = true; res();
+        this.gapiLoaded = true; res();
+      }));
+    }
+    if (!this.gisLoaded) {
+      await new Promise(res => {
+        if (window.google?.accounts) { this.gisLoaded = true; res(); return; }
+        const s = document.createElement('script');
+        s.src = 'https://accounts.google.com/gsi/client';
+        s.onload = () => { this.gisLoaded = true; res(); };
+        document.head.appendChild(s);
       });
-    });
+    }
   },
 
-  _loadGIS() {
-    return new Promise(res => {
-      if (window.google?.accounts) { this.gisReady = true; res(); return; }
-      const s = document.createElement('script');
-      s.src = 'https://accounts.google.com/gsi/client';
-      s.onload = () => { this.gisReady = true; res(); };
-      document.head.appendChild(s);
-    });
-  },
-
-  _storeKey() { return 'clouduck_gd_' + this.clientId; },
-
-  _saveToken(token, email) {
-    localStorage.setItem(this._storeKey(), JSON.stringify({
-      token, email, expiry: Date.now() + 55 * 60 * 1000  // 55 min (tokens last 1hr)
-    }));
-  },
-
-  _loadToken() {
-    try { return JSON.parse(localStorage.getItem(this._storeKey())); } catch { return null; }
-  },
-
-  clearToken() { localStorage.removeItem(this._storeKey()); },
-
-  connect(silent = false) {
+  // Connect — uses stored token first, OAuth popup only when truly needed
+  connect(bmId, storedEmail) {
     return new Promise((resolve, reject) => {
-      // 1 — Check stored token first (valid for 55 min)
-      const stored = this._loadToken();
-      if (stored && stored.expiry > Date.now()) {
+      // Step 1: restore from localStorage if still valid
+      const stored = TokenStore.load(bmId);
+      if (stored?.token && TokenStore.valid(bmId)) {
         this.token = stored.token;
-        this.userEmail = stored.email;
+        this.email = stored.email;
         gapi.client.setToken({ access_token: this.token });
-        resolve({ email: stored.email });
+        resolve({ email: this.email });
         return;
       }
 
-      // 2 — Try silent re-auth (no popup, works while browser has Google session)
-      const hint = stored?.email || '';
+      // Step 2: OAuth popup (once per hour)
       const tc = google.accounts.oauth2.initTokenClient({
         client_id: this.clientId,
         scope: 'https://www.googleapis.com/auth/drive',
-        hint,
+        // login_hint pre-selects the right account — no account picker shown
+        // if user has only one Google session active
+        login_hint: storedEmail || '',
         callback: async (resp) => {
-          if (resp.error) {
-            if (silent) { reject(new Error('silent_fail')); return; }
-            reject(new Error(resp.error)); return;
-          }
+          if (resp.error) { reject(new Error(resp.error)); return; }
           this.token = resp.access_token;
           gapi.client.setToken({ access_token: this.token });
           try {
             const r = await gapi.client.drive.about.get({ fields: 'user' });
-            this.userEmail = r.result.user.emailAddress;
-            this._saveToken(this.token, this.userEmail);
-            resolve({ email: this.userEmail });
+            this.email = r.result.user.emailAddress;
+            TokenStore.save(bmId, { type: 'googledrive', token: this.token, email: this.email });
+            resolve({ email: this.email });
           } catch(e) { reject(e); }
         }
       });
-      // silent = '' means no popup consent screen (invisible refresh)
-      // non-silent = 'select_account' shows account picker
-      tc.requestAccessToken({ prompt: silent ? '' : 'select_account' });
+      // prompt:'select_account' only shown first time; after that login_hint skips it
+      tc.requestAccessToken({ prompt: storedEmail ? '' : 'select_account' });
     });
   },
 
@@ -617,29 +610,29 @@ const GDriveProvider = {
     let all = [], pt = null;
     do {
       const p = { q: `'${folderId}' in parents and trashed=false`, pageSize: 200,
-        fields: 'nextPageToken,files(id,name,mimeType,size,modifiedTime,starred,webViewLink,webContentLink)', orderBy: 'folder,name' };
+        fields: 'nextPageToken,files(id,name,mimeType,size,modifiedTime,starred,webViewLink,webContentLink)',
+        orderBy: 'folder,name' };
       if (pt) p.pageToken = pt;
       const r = await gapi.client.drive.files.list(p);
       all = all.concat(r.result.files || []);
       pt = r.result.nextPageToken;
-    } while(pt && all.length < 2000);
+    } while (pt && all.length < 2000);
     return all.map(f => ({
       id: f.id, name: f.name, isFolder: f.mimeType === 'application/vnd.google-apps.folder',
       size: parseInt(f.size) || 0, mimeType: f.mimeType, modified: f.modifiedTime,
-      webViewLink: f.webViewLink, webContentLink: f.webContentLink, raw: f
+      webViewLink: f.webViewLink, webContentLink: f.webContentLink,
     }));
   },
 
   async download(file) {
     if (file.webContentLink) { window.open(file.webContentLink, '_blank'); return; }
-    if (file.webViewLink) { window.open(file.webViewLink, '_blank'); return; }
-    toast('Cannot download Google Docs — opening in browser', 'info');
+    if (file.webViewLink)    { window.open(file.webViewLink, '_blank'); return; }
+    toast('Cannot download Google Docs natively — opening in browser', 'info');
   },
 
   async upload(folderId, file, onProgress) {
-    const metadata = { name: file.name, parents: [folderId] };
     const form = new FormData();
-    form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
+    form.append('metadata', new Blob([JSON.stringify({ name: file.name, parents: [folderId] })], { type: 'application/json' }));
     form.append('file', file);
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
@@ -654,7 +647,8 @@ const GDriveProvider = {
 
   async createFolder(parentId, name) {
     gapi.client.setToken({ access_token: this.token });
-    const r = await gapi.client.drive.files.create({ resource: { name, mimeType: 'application/vnd.google-apps.folder', parents: [parentId] }, fields: 'id,name' });
+    const r = await gapi.client.drive.files.create({
+      resource: { name, mimeType: 'application/vnd.google-apps.folder', parents: [parentId] }, fields: 'id,name' });
     return r.result;
   },
 
@@ -669,74 +663,77 @@ const GDriveProvider = {
   }
 };
 
-// ── OneDrive (Microsoft Graph) ───────────────────────
+// ── OneDrive ─────────────────────────────────────────────────
+// One MSAL instance per clientId — keeps token cache alive
+const _msalInstances = {};
+
 const OneDriveProvider = {
-  name: 'OneDrive',
-  color: '#0078d4',
-  icon: '🔵',
-  token: null,
+  name: 'OneDrive', color: '#0078d4', icon: '🔵',
 
   async init(config) {
     this.clientId = config.clientId;
-    await this._loadMSAL();
-    this.msalApp = new msal.PublicClientApplication({
-      auth: { clientId: this.clientId, redirectUri: location.origin + location.pathname }
-    });
+    if (!window.msal) {
+      await new Promise((res, rej) => {
+        const s = document.createElement('script');
+        s.src = 'https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.27.0/lib/msal-browser.min.js';
+        s.onload = res; s.onerror = rej;
+        document.head.appendChild(s);
+      });
+    }
+    // Reuse same MSAL instance — this is what keeps the token cache alive
+    if (!_msalInstances[this.clientId]) {
+      _msalInstances[this.clientId] = new msal.PublicClientApplication({
+        auth: { clientId: this.clientId, redirectUri: location.origin + location.pathname },
+        cache: { cacheLocation: 'localStorage', storeAuthStateInCookie: false }
+      });
+      await _msalInstances[this.clientId].initialize();
+    }
+    this.msalApp = _msalInstances[this.clientId];
   },
 
-  _loadMSAL() {
-    return new Promise((res, rej) => {
-      if (window.msal) { res(); return; }
-      const s = document.createElement('script');
-      s.src = 'https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.27.0/lib/msal-browser.min.js';
-      s.onload = res; s.onerror = rej;
-      document.head.appendChild(s);
-    });
-  },
-
-  async connect(silent = false) {
+  async connect(bmId) {
     const scopes = ['Files.ReadWrite', 'User.Read'];
 
-    // 1 — Try silent token refresh (MSAL caches accounts in localStorage)
+    // Step 1: silent — MSAL localStorage cache survives page reloads
     const accounts = this.msalApp.getAllAccounts();
     if (accounts.length > 0) {
       try {
         const tr = await this.msalApp.acquireTokenSilent({ scopes, account: accounts[0] });
         this.token = tr.accessToken;
         this.account = accounts[0];
+        TokenStore.save(bmId, { type: 'onedrive', hasAccount: true });
         return { email: accounts[0].username };
-      } catch(silentErr) {
-        if (silent) throw new Error('silent_fail');
-        // Fall through to popup
-      }
+      } catch (e) { /* silent failed, fall through to popup */ }
     }
 
-    if (silent) throw new Error('silent_fail');
-
-    // 2 — Fall back to popup login
+    // Step 2: popup (only first time, or after logout)
     try {
       const r = await this.msalApp.loginPopup({ scopes });
       const tr = await this.msalApp.acquireTokenSilent({ scopes, account: r.account });
       this.token = tr.accessToken;
       this.account = r.account;
+      TokenStore.save(bmId, { type: 'onedrive', hasAccount: true });
       return { email: r.account.username };
-    } catch(e) {
+    } catch (e) {
       const r = await this.msalApp.acquireTokenPopup({ scopes });
       this.token = r.accessToken;
-      return { email: r.account.username };
+      return { email: r.account?.username || 'OneDrive' };
     }
   },
 
   async _graph(path, opts = {}) {
     const resp = await fetch('https://graph.microsoft.com/v1.0' + path, {
-      ...opts, headers: { Authorization: 'Bearer ' + this.token, 'Content-Type': 'application/json', ...(opts.headers || {}) }
+      ...opts,
+      headers: { Authorization: 'Bearer ' + this.token, 'Content-Type': 'application/json', ...(opts.headers || {}) }
     });
     if (!resp.ok) throw new Error(await resp.text());
     return opts.raw ? resp : resp.json();
   },
 
   async listFiles(folderId = 'root') {
-    const path = folderId === 'root' ? '/me/drive/root/children' : `/me/drive/items/${folderId}/children`;
+    const path = folderId === 'root'
+      ? '/me/drive/root/children'
+      : `/me/drive/items/${folderId}/children`;
     const r = await this._graph(path + '?$top=500&$select=id,name,folder,size,lastModifiedDateTime,file,@microsoft.graph.downloadUrl');
     return (r.value || []).map(f => ({
       id: f.id, name: f.name, isFolder: !!f.folder,
@@ -746,13 +743,19 @@ const OneDriveProvider = {
   },
 
   async download(file) {
-    if (file.downloadUrl) window.open(file.downloadUrl, '_blank');
-    else { const r = await this._graph(`/me/drive/items/${file.id}`); window.open(r['@microsoft.graph.downloadUrl'], '_blank'); }
+    if (file.downloadUrl) { window.open(file.downloadUrl, '_blank'); return; }
+    const r = await this._graph(`/me/drive/items/${file.id}`);
+    window.open(r['@microsoft.graph.downloadUrl'], '_blank');
   },
 
   async upload(folderId, file, onProgress) {
-    const path = folderId === 'root' ? `/me/drive/root:/${file.name}:/content` : `/me/drive/items/${folderId}:/${file.name}:/content`;
-    return this._graph(path, { method: 'PUT', body: file });
+    const path = folderId === 'root'
+      ? `/me/drive/root:/${file.name}:/content`
+      : `/me/drive/items/${folderId}:/${file.name}:/content`;
+    onProgress(50);
+    const r = await this._graph(path, { method: 'PUT', body: file });
+    onProgress(100);
+    return r;
   },
 
   async createFolder(parentId, name) {
@@ -760,56 +763,53 @@ const OneDriveProvider = {
     return this._graph(path, { method: 'POST', body: JSON.stringify({ name, folder: {}, '@microsoft.graph.conflictBehavior': 'rename' }) });
   },
 
-  async delete(file) {
-    await this._graph(`/me/drive/items/${file.id}`, { method: 'DELETE', raw: true });
-  },
+  async delete(file) { await this._graph(`/me/drive/items/${file.id}`, { method: 'DELETE', raw: true }); },
 
   async rename(file, newName) {
     await this._graph(`/me/drive/items/${file.id}`, { method: 'PATCH', body: JSON.stringify({ name: newName }) });
   }
 };
 
-// ── Dropbox ──────────────────────────────────────────
+// ── Dropbox ───────────────────────────────────────────────────
 const DropboxProvider = {
-  name: 'Dropbox',
-  color: '#0061ff',
-  icon: '📦',
-
+  name: 'Dropbox', color: '#0061ff', icon: '📦',
   async init(config) { this.token = config.token; },
-  async connect(silent = false) {
+
+  async connect(bmId) {
+    // Token is stored in bookmark config — no OAuth needed
     const r = await this._api('users/get_current_account', {});
     return { email: r.email };
   },
 
   async _api(endpoint, body) {
     const r = await fetch('https://api.dropboxapi.com/2/' + endpoint, {
-      method: 'POST', headers: { Authorization: 'Bearer ' + this.token, 'Content-Type': 'application/json' },
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + this.token, 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
     if (!r.ok) throw new Error(await r.text());
     return r.status === 200 ? r.json() : null;
   },
 
-  async listFiles(path = '') {
+  async listFiles(path = 'root') {
     const r = await this._api('files/list_folder', { path: path === 'root' ? '' : path, limit: 500 });
-    const mapper = f => ({
+    const map = f => ({
       id: f.path_lower, name: f.name, isFolder: f['.tag'] === 'folder',
       size: f.size || 0, mimeType: f.is_downloadable ? 'file' : 'folder',
       modified: f.client_modified, path: f.path_lower
     });
-    let entries = (r.entries || []).map(mapper);
-    let cursor = r.cursor, hasMore = r.has_more;
-    while(hasMore) {
+    let entries = (r.entries || []).map(map), cursor = r.cursor, hasMore = r.has_more;
+    while (hasMore) {
       const c = await this._api('files/list_folder/continue', { cursor });
-      entries = entries.concat((c.entries || []).map(mapper));
-      cursor = c.cursor; hasMore = c.has_more;
+      entries = entries.concat((c.entries || []).map(map)); cursor = c.cursor; hasMore = c.has_more;
     }
     return entries;
   },
 
   async download(file) {
     const r = await fetch('https://content.dropboxapi.com/2/files/download', {
-      method: 'POST', headers: { Authorization: 'Bearer ' + this.token, 'Dropbox-API-Arg': JSON.stringify({ path: file.path }) }
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + this.token, 'Dropbox-API-Arg': JSON.stringify({ path: file.path }) }
     });
     const blob = await r.blob();
     const url = URL.createObjectURL(blob);
@@ -818,18 +818,16 @@ const DropboxProvider = {
 
   async upload(folderId, file, onProgress) {
     const path = (folderId === 'root' ? '' : folderId) + '/' + file.name;
-    const r = await fetch('https://content.dropboxapi.com/2/files/upload', {
+    await fetch('https://content.dropboxapi.com/2/files/upload', {
       method: 'POST',
       headers: { Authorization: 'Bearer ' + this.token, 'Content-Type': 'application/octet-stream', 'Dropbox-API-Arg': JSON.stringify({ path, mode: 'add', autorename: true }) },
       body: file
     });
     onProgress(100);
-    return r.json();
   },
 
   async createFolder(parentId, name) {
-    const path = (parentId === 'root' ? '' : parentId) + '/' + name;
-    return this._api('files/create_folder_v2', { path, autorename: false });
+    await this._api('files/create_folder_v2', { path: (parentId === 'root' ? '' : parentId) + '/' + name });
   },
 
   async delete(file) { await this._api('files/delete_v2', { path: file.path }); },
@@ -840,12 +838,9 @@ const DropboxProvider = {
   }
 };
 
-// ── S3 Compatible ────────────────────────────────────
+// ── S3 Compatible ─────────────────────────────────────────────
 const S3Provider = {
-  name: 'S3',
-  color: '#ff9900',
-  icon: '🪣',
-
+  name: 'S3', color: '#ff9900', icon: '🪣',
   async init(config) {
     this.endpoint = config.endpoint.replace(/\/$/, '');
     this.bucket = config.bucket;
@@ -853,14 +848,12 @@ const S3Provider = {
     this.secretKey = config.secretKey;
     this.region = config.region || 'us-east-1';
   },
-
-  async connect(silent = false) { await this.listFiles('root'); return { email: this.bucket }; },
+  async connect(bmId) { await this.listFiles('root'); return { email: this.bucket }; },
 
   async listFiles(prefix = 'root') {
     const p = prefix === 'root' ? '' : prefix;
     const url = `${this.endpoint}/${this.bucket}?list-type=2&delimiter=/&prefix=${encodeURIComponent(p)}&max-keys=1000`;
-    const headers = await this._sign('GET', `/${this.bucket}`, { 'list-type': '2', delimiter: '/', prefix: p, 'max-keys': '1000' });
-    const r = await fetch(url, { headers });
+    const r = await fetch(url);
     if (!r.ok) throw new Error(await r.text());
     const xml = new DOMParser().parseFromString(await r.text(), 'text/xml');
     const files = [];
@@ -879,81 +872,148 @@ const S3Provider = {
     return files;
   },
 
-  async download(file) {
-    const url = `${this.endpoint}/${this.bucket}/${file.path}`;
-    window.open(url, '_blank');
-  },
-
+  async download(file) { window.open(`${this.endpoint}/${this.bucket}/${file.path}`, '_blank'); },
   async upload(prefix, file, onProgress) {
     const key = (prefix === 'root' ? '' : prefix) + file.name;
-    const url = `${this.endpoint}/${this.bucket}/${key}`;
-    return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.upload.onprogress = e => e.lengthComputable && onProgress(e.loaded / e.total * 100);
-      xhr.onload = () => xhr.status < 300 ? resolve() : reject(new Error(xhr.statusText));
-      xhr.onerror = reject;
-      xhr.open('PUT', url);
-      xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
-      xhr.send(file);
-    });
+    const r = await fetch(`${this.endpoint}/${this.bucket}/${key}`, { method: 'PUT', body: file, headers: { 'Content-Type': file.type || 'application/octet-stream' } });
+    if (!r.ok) throw new Error(r.statusText);
+    onProgress(100);
   },
-
   async createFolder(parentId, name) {
     const key = (parentId === 'root' ? '' : parentId) + name + '/';
-    const url = `${this.endpoint}/${this.bucket}/${key}`;
-    const r = await fetch(url, { method: 'PUT', headers: { 'Content-Length': '0' } });
-    if (!r.ok) throw new Error(await r.text());
+    await fetch(`${this.endpoint}/${this.bucket}/${key}`, { method: 'PUT', headers: { 'Content-Length': '0' } });
   },
-
-  async delete(file) {
-    const url = `${this.endpoint}/${this.bucket}/${file.path}`;
-    await fetch(url, { method: 'DELETE' });
-  },
-
-  async rename(file, newName) { toast('S3 rename: delete + re-upload required', 'info'); },
-
-  async _sign(method, path, queryParams = {}) {
-    // Minimal HMAC-SHA256 signing using SubtleCrypto
-    const now = new Date();
-    const dateStr = now.toISOString().replace(/[:-]|\.\d{3}/g, '').slice(0, 15) + 'Z';
-    const dateShort = dateStr.slice(0, 8);
-    const host = new URL(this.endpoint).host;
-    const scope = `${dateShort}/${this.region}/s3/aws4_request`;
-    const qs = Object.entries(queryParams).sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>`${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
-    const canonicalHeaders = `host:${host}\nx-amz-date:${dateStr}\n`;
-    const signedHeaders = 'host;x-amz-date';
-    const canonical = [method, path, qs, canonicalHeaders, signedHeaders, 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'].join('\n');
-    const strToSign = ['AWS4-HMAC-SHA256', dateStr, scope, await sha256(canonical)].join('\n');
-    const key = await deriveKey(this.secretKey, dateShort, this.region);
-    const sig = await hmacHex(key, strToSign);
-    return { 'x-amz-date': dateStr, 'Authorization': `AWS4-HMAC-SHA256 Credential=${this.accessKey}/${scope},SignedHeaders=${signedHeaders},Signature=${sig}` };
-  }
+  async delete(file) { await fetch(`${this.endpoint}/${this.bucket}/${file.path}`, { method: 'DELETE' }); },
+  async rename() { toast('S3 rename: delete + re-upload required', 'info'); }
 };
 
-async function sha256(msg) {
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(msg));
-  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
-}
-async function hmacRaw(key, data) {
-  const k = typeof key === 'string' ? new TextEncoder().encode('AWS4' + key) : key;
-  const ck = await crypto.subtle.importKey('raw', k, {name:'HMAC',hash:'SHA-256'}, false, ['sign']);
-  return new Uint8Array(await crypto.subtle.sign('HMAC', ck, new TextEncoder().encode(data)));
-}
-async function hmacHex(key, data) {
-  const raw = await hmacRaw(key, data);
-  return Array.from(raw).map(b=>b.toString(16).padStart(2,'0')).join('');
-}
-async function deriveKey(secret, date, region) {
-  let k = await hmacRaw(secret, date);
-  k = await hmacRaw(k, region);
-  k = await hmacRaw(k, 's3');
-  k = await hmacRaw(k, 'aws4_request');
-  return k;
+const PROVIDERS = { googledrive: GDriveProvider, onedrive: OneDriveProvider, dropbox: DropboxProvider, s3: S3Provider };
+
+// ═══════════════════════════════════════════════════════════════
+//  BOOKMARK MANAGEMENT — CORE FIX
+// ═══════════════════════════════════════════════════════════════
+async function openBookmark(bm) {
+  State.activeBookmark = bm;
+  renderBookmarks();
+
+  // ── FAST PATH: provider already connected this session ──────
+  // Switching accounts = instant, zero popup
+  const cached = ProviderCache[bm.id];
+  if (cached?.connected) {
+    State.provider = cached.provider;
+    document.getElementById('stat-provider').textContent = bm.name + ' · ' + (bm.email || '');
+    State.currentFolderId = 'root';
+    State.currentPath = [];
+    State.history = ['root']; State.historyIdx = 0;
+    renderBreadcrumb();
+    await loadFiles('root');
+    return;
+  }
+
+  // ── SLOW PATH: first connect (OAuth once, then cached) ──────
+  showLoading('Connecting to ' + bm.name + '…');
+  try {
+    const proto = PROVIDERS[bm.type];
+    const p = Object.assign(Object.create(Object.getPrototypeOf(proto)), proto);
+    await p.init(bm.config);
+    const info = await p.connect(bm.id, bm.email);
+
+    // Cache it — next click uses fast path, no OAuth
+    ProviderCache[bm.id] = { provider: p, connected: true };
+    State.provider = p;
+
+    bm.email = info.email;
+    saveBookmarks();
+    renderBookmarks();
+    document.getElementById('stat-provider').textContent = bm.name + ' · ' + info.email;
+    State.currentFolderId = 'root';
+    State.currentPath = [];
+    State.history = ['root']; State.historyIdx = 0;
+    renderBreadcrumb();
+    toast('Connected: ' + info.email, 'success');
+    await loadFiles('root');
+  } catch (e) {
+    console.error(e);
+    ProviderCache[bm.id] = null; // clear bad cache
+    toast('Connection failed: ' + e.message, 'error');
+    showEmpty('Could not connect — click the bookmark to try again.');
+  }
 }
 
-// ═══════════════════════════════════════════════════════
+async function connectBookmark() {
+  const type = selectedProvider;
+  let config = {}, name = '';
+  if (type === 'googledrive') {
+    config.clientId = document.getElementById('gd-client-id').value.trim();
+    name = document.getElementById('gd-name').value.trim() || 'Google Drive';
+    if (!config.clientId) { toast('Client ID required', 'error'); return; }
+  } else if (type === 'onedrive') {
+    config.clientId = document.getElementById('od-client-id').value.trim();
+    name = document.getElementById('od-name').value.trim() || 'OneDrive';
+    if (!config.clientId) { toast('Client ID required', 'error'); return; }
+  } else if (type === 'dropbox') {
+    config.token = document.getElementById('dbx-token').value.trim();
+    name = document.getElementById('dbx-name').value.trim() || 'Dropbox';
+    if (!config.token) { toast('Access token required', 'error'); return; }
+  } else if (type === 's3') {
+    config.endpoint  = document.getElementById('s3-endpoint').value.trim();
+    config.bucket    = document.getElementById('s3-bucket').value.trim();
+    config.accessKey = document.getElementById('s3-key').value.trim();
+    config.secretKey = document.getElementById('s3-secret').value.trim();
+    config.region    = document.getElementById('s3-region').value.trim() || 'us-east-1';
+    name = document.getElementById('s3-name').value.trim() || config.bucket || 'S3 Bucket';
+    if (!config.endpoint || !config.bucket) { toast('Endpoint and bucket required', 'error'); return; }
+  }
+  const colors = { googledrive:'#fbbc04', onedrive:'#0078d4', dropbox:'#0061ff', s3:'#ff9900' };
+  const bm = { id: Date.now().toString(), type, name, config, color: colors[type] };
+  State.bookmarks.push(bm);
+  saveBookmarks();
+  closeModal('modal-conn');
+  renderBookmarks();
+  await openBookmark(bm);
+}
+
+function removeBookmark(id, e) {
+  e.stopPropagation();
+  State.bookmarks = State.bookmarks.filter(b => b.id !== id);
+  saveBookmarks();
+  delete ProviderCache[id];
+  TokenStore.clear(id);
+  renderBookmarks();
+  if (State.activeBookmark?.id === id) {
+    State.activeBookmark = null; State.provider = null; showEmpty();
+    document.getElementById('stat-provider').textContent = '';
+  }
+}
+
+function renderBookmarks() {
+  const c = document.getElementById('bookmark-list');
+  if (!State.bookmarks.length) { c.innerHTML = ''; return; }
+  const icons = { googledrive:'🟡', onedrive:'🔵', dropbox:'📦', s3:'🪣' };
+  c.innerHTML = State.bookmarks.map(bm => {
+    const isActive = State.activeBookmark?.id === bm.id;
+    const isCached = !!ProviderCache[bm.id]?.connected;
+    const dotColor = isActive ? 'var(--green)' : isCached ? 'var(--amber)' : 'var(--muted2)';
+    const dotTitle = isActive ? 'active' : isCached ? 'cached — instant switch' : 'click to connect';
+    return `
+      <div class="bookmark-item ${isActive ? 'active' : ''}"
+        onclick="openBookmark(${JSON.stringify(bm).replace(/"/g,'&quot;')})">
+        <div class="bm-icon" style="background:${bm.color}22;color:${bm.color}">${icons[bm.type]||'☁'}</div>
+        <div class="bm-info">
+          <div class="bm-name">${esc(bm.name)}</div>
+          <div class="bm-host" style="display:flex;align-items:center;gap:4px">
+            <span style="width:6px;height:6px;border-radius:50%;background:${dotColor};flex-shrink:0;display:inline-block" title="${dotTitle}"></span>
+            ${esc(bm.email || bm.type)}
+          </div>
+        </div>
+        <button class="bm-remove" onclick="removeBookmark('${bm.id}',event)" title="Remove">✕</button>
+      </div>`;
+  }).join('');
+}
+
+// ═══════════════════════════════════════════════════════════════
 //  CONNECTION MODAL
-// ═══════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 let selectedProvider = 'googledrive';
 
 function openNewConn() { openModal('modal-conn'); }
@@ -968,129 +1028,25 @@ function selectProvider(type) {
   });
 }
 
-async function connectBookmark() {
-  const type = selectedProvider;
-  let config = {}, name = '';
-
-  if (type === 'googledrive') {
-    config.clientId = document.getElementById('gd-client-id').value.trim();
-    name = document.getElementById('gd-name').value.trim() || 'Google Drive';
-    if (!config.clientId) { toast('Client ID required', 'error'); return; }
-  } else if (type === 'onedrive') {
-    config.clientId = document.getElementById('od-client-id').value.trim();
-    name = document.getElementById('od-name').value.trim() || 'OneDrive';
-    if (!config.clientId) { toast('Client ID required', 'error'); return; }
-  } else if (type === 'dropbox') {
-    config.token = document.getElementById('dbx-token').value.trim();
-    name = document.getElementById('dbx-name').value.trim() || 'Dropbox';
-    if (!config.token) { toast('Access token required', 'error'); return; }
-  } else if (type === 's3') {
-    config.endpoint = document.getElementById('s3-endpoint').value.trim();
-    config.bucket = document.getElementById('s3-bucket').value.trim();
-    config.accessKey = document.getElementById('s3-key').value.trim();
-    config.secretKey = document.getElementById('s3-secret').value.trim();
-    config.region = document.getElementById('s3-region').value.trim() || 'us-east-1';
-    name = document.getElementById('s3-name').value.trim() || config.bucket || 'S3 Bucket';
-    if (!config.endpoint || !config.bucket) { toast('Endpoint and bucket required', 'error'); return; }
-  }
-
-  const bm = { id: Date.now().toString(), type, name, config, color: {googledrive:'#fbbc04',onedrive:'#0078d4',dropbox:'#0061ff',s3:'#ff9900'}[type] };
-  State.bookmarks.push(bm);
-  saveBookmarks();
-  closeModal('modal-conn');
-  renderBookmarks();
-  await openBookmark(bm);
-}
-
-// ═══════════════════════════════════════════════════════
-//  BOOKMARK MANAGEMENT
-// ═══════════════════════════════════════════════════════
-const PROVIDERS = { googledrive: GDriveProvider, onedrive: OneDriveProvider, dropbox: DropboxProvider, s3: S3Provider };
-
-async function openBookmark(bm, silent = false) {
-  if (!silent) {
-    State.activeBookmark = bm;
-    renderBookmarks();
-    showLoading('Connecting to ' + bm.name + '…');
-  }
-
-  try {
-    const pProto = PROVIDERS[bm.type];
-    const p = Object.create(pProto);
-    await p.init(bm.config);
-    const info = await p.connect(silent);
-    State.provider = p;
-    State.currentFolderId = 'root';
-    State.currentPath = [];
-    State.history = ['root'];
-    State.historyIdx = 0;
-    bm.email = info.email;
-    saveBookmarks();
-    State.activeBookmark = bm;
-    renderBookmarks();
-    document.getElementById('stat-provider').textContent = bm.name + (info.email ? ' · ' + info.email : '');
-    if (!silent) toast('Connected to ' + bm.name, 'success');
-    await loadFiles('root');
-  } catch(e) {
-    if (silent) throw e;  // let autoConnect handle it
-    console.error(e);
-    // If token expired, clear it so next click forces fresh login
-    if (PROVIDERS[bm.type]?.clearToken) PROVIDERS[bm.type].clearToken?.call({ clientId: bm.config.clientId });
-    toast('Connection failed: ' + e.message, 'error');
-    showEmpty();
-  }
-}
-
-function removeBookmark(id, e) {
-  e.stopPropagation();
-  State.bookmarks = State.bookmarks.filter(b => b.id !== id);
-  saveBookmarks();
-  renderBookmarks();
-  if (State.activeBookmark?.id === id) { State.activeBookmark = null; State.provider = null; showEmpty(); }
-}
-
-function renderBookmarks() {
-  const c = document.getElementById('bookmark-list');
-  if (!State.bookmarks.length) { c.innerHTML = ''; return; }
-  c.innerHTML = State.bookmarks.map(bm => `
-    <div class="bookmark-item ${State.activeBookmark?.id === bm.id ? 'active' : ''}"
-      onclick="openBookmark(${JSON.stringify(bm).replace(/"/g,'&quot;')})">
-      <div class="bm-icon" style="background:${bm.color}22;color:${bm.color}">
-        ${{googledrive:'🟡',onedrive:'🔵',dropbox:'📦',s3:'🪣'}[bm.type]}
-      </div>
-      <div class="bm-info">
-        <div class="bm-name">${esc(bm.name)}</div>
-        <div class="bm-host" style="display:flex;align-items:center;gap:5px">
-          ${State.activeBookmark?.id === bm.id
-            ? `<span style="width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block;flex-shrink:0"></span>`
-            : `<span style="width:6px;height:6px;border-radius:50%;background:var(--muted2);display:inline-block;flex-shrink:0"></span>`
-          }
-          ${esc(bm.email || bm.type)}
-        </div>
-      </div>
-      <button class="bm-remove" onclick="removeBookmark('${bm.id}',event)" title="Remove">✕</button>
-    </div>
-  `).join('');
-}
-
-// ═══════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 //  FILE LOADING & RENDERING
-// ═══════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 async function loadFiles(folderId) {
   showLoading('Loading…');
   State.selected.clear();
   State.currentFolderId = folderId;
-  document.getElementById('addressbar').value = buildPath();
-
   try {
     State.files = await State.provider.listFiles(folderId);
-    applySort();
-    renderFiles();
-    updateStatus();
+    applySort(); renderFiles(); updateStatus();
   } catch(e) {
     console.error(e);
-    toast('Error loading files: ' + e.message, 'error');
-    showEmpty('Failed to load — ' + e.message);
+    // Token may have expired — clear cache so next click re-auths
+    if (State.activeBookmark) {
+      ProviderCache[State.activeBookmark.id] = null;
+      TokenStore.clear(State.activeBookmark.id);
+    }
+    toast('Error: ' + e.message + ' — click account to reconnect', 'error');
+    showEmpty('Session expired. Click the bookmark to reconnect.');
   }
 }
 
@@ -1110,12 +1066,10 @@ function renderFiles() {
   const tbody = document.getElementById('file-tbody');
   document.getElementById('file-table').style.display = '';
   document.getElementById('empty-state').style.display = 'none';
-
   if (!State.filtered.length) {
     tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:40px;color:var(--muted)">Empty folder</td></tr>`;
     return;
   }
-
   const bm = State.activeBookmark;
   tbody.innerHTML = State.filtered.map(f => `
     <tr data-id="${esc(f.id)}"
@@ -1128,424 +1082,334 @@ function renderFiles() {
           <span class="file-name ${f.isFolder?'folder':''}">${esc(f.name)}</span>
         </div>
       </td>
-      <td class="col-size" style="text-align:right;font-family:var(--mono);font-size:12px;color:var(--muted)">${f.isFolder ? '—' : fmtSize(f.size)}</td>
-      <td class="col-type" style="color:var(--muted);font-size:12px">${f.isFolder ? 'Folder' : mimeLabel(f.mimeType)}</td>
+      <td class="col-size" style="text-align:right;font-family:var(--mono);font-size:12px;color:var(--muted)">${f.isFolder?'—':fmtSize(f.size)}</td>
+      <td class="col-type" style="color:var(--muted);font-size:12px">${f.isFolder?'Folder':mimeLabel(f.mimeType)}</td>
       <td class="col-date" style="font-family:var(--mono);font-size:11px;color:var(--muted)">${fmtDate(f.modified)}</td>
       <td class="col-acct" style="text-align:center"><span class="acct-pill" style="background:${bm?.color||'#888'}" title="${esc(bm?.name||'')}"></span></td>
-    </tr>
-  `).join('');
+    </tr>`).join('');
 }
 
-// ═══════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 //  ROW INTERACTIONS
-// ═══════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 function onRowClick(e, id) {
-  if (e.ctrlKey || e.metaKey) {
-    State.selected.has(id) ? State.selected.delete(id) : State.selected.add(id);
-  } else if (e.shiftKey && State.selected.size) {
-    const ids = State.filtered.map(f => f.id);
-    const last = [...State.selected].at(-1);
-    const i = ids.indexOf(last), j = ids.indexOf(id);
-    const [s, en] = [Math.min(i,j), Math.max(i,j)];
-    ids.slice(s, en+1).forEach(fid => State.selected.add(fid));
-  } else {
-    State.selected.clear();
-    State.selected.add(id);
-  }
-  document.querySelectorAll('#file-tbody tr').forEach(tr => {
-    tr.classList.toggle('selected', State.selected.has(tr.dataset.id));
-  });
+  if (e.ctrlKey||e.metaKey) { State.selected.has(id)?State.selected.delete(id):State.selected.add(id); }
+  else if (e.shiftKey && State.selected.size) {
+    const ids = State.filtered.map(f=>f.id), last = [...State.selected].at(-1);
+    const i = ids.indexOf(last), j = ids.indexOf(id), [s,en] = [Math.min(i,j),Math.max(i,j)];
+    ids.slice(s,en+1).forEach(fid=>State.selected.add(fid));
+  } else { State.selected.clear(); State.selected.add(id); }
+  document.querySelectorAll('#file-tbody tr').forEach(tr=>tr.classList.toggle('selected',State.selected.has(tr.dataset.id)));
   updateStatus();
 }
 
 function onDblClick(id) {
-  const file = State.filtered.find(f => f.id === id);
+  const file = State.filtered.find(f=>f.id===id);
   if (!file) return;
   if (file.isFolder) {
-    State.currentPath.push({ id: State.currentFolderId, name: State.currentPath.length === 0 ? (State.activeBookmark?.name || 'Root') : State.currentPath.at(-1)?.name });
+    State.currentPath.push({ id: State.currentFolderId, name: State.currentPath.length===0?(State.activeBookmark?.name||'Root'):State.currentPath.at(-1)?.name });
     navigateTo(file.id, file.name);
   } else {
-    State.provider.download(file).catch(e => toast(e.message, 'error'));
+    State.provider.download(file).catch(e=>toast(e.message,'error'));
   }
 }
 
 let ctxFileId = null;
 function onRowCtx(e, id) {
-  e.preventDefault();
-  ctxFileId = id;
+  e.preventDefault(); ctxFileId = id;
   State.selected.clear(); State.selected.add(id);
-  document.querySelectorAll('#file-tbody tr').forEach(tr => tr.classList.toggle('selected', tr.dataset.id === id));
-  const menu = document.getElementById('ctx-menu');
-  menu.style.display = 'block';
-  menu.style.left = Math.min(e.clientX, innerWidth - 200) + 'px';
-  menu.style.top = Math.min(e.clientY, innerHeight - 160) + 'px';
+  document.querySelectorAll('#file-tbody tr').forEach(tr=>tr.classList.toggle('selected',tr.dataset.id===id));
+  const m = document.getElementById('ctx-menu');
+  m.style.display='block';
+  m.style.left=Math.min(e.clientX,innerWidth-200)+'px';
+  m.style.top=Math.min(e.clientY,innerHeight-160)+'px';
 }
+document.addEventListener('click', ()=>{ document.getElementById('ctx-menu').style.display='none'; });
+function ctxDownload() { const f=State.filtered.find(x=>x.id===ctxFileId); if(f) State.provider.download(f); }
+function ctxRename()   { const f=State.filtered.find(x=>x.id===ctxFileId); if(f) promptRename(f); }
+function ctxDelete()   { deleteSelected(); }
+function ctxNewFolder(){ promptNewFolder(); }
 
-document.addEventListener('click', () => { document.getElementById('ctx-menu').style.display = 'none'; });
-
-function ctxDownload() { const f = State.filtered.find(x => x.id === ctxFileId); if (f) State.provider.download(f); }
-function ctxRename() { const f = State.filtered.find(x => x.id === ctxFileId); if (f) promptRename(f); }
-function ctxDelete() { deleteSelected(); }
-function ctxNewFolder() { promptNewFolder(); }
-
-// ═══════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 //  NAVIGATION
-// ═══════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 function navigateTo(folderId, folderName) {
-  // Push to history
-  State.history = State.history.slice(0, State.historyIdx + 1);
-  State.history.push(folderId);
-  State.historyIdx++;
+  State.history = State.history.slice(0, State.historyIdx+1);
+  State.history.push(folderId); State.historyIdx++;
   loadFiles(folderId);
   if (folderName) State.currentPath.push({ id: folderId, name: folderName });
   renderBreadcrumb();
 }
-
 function goBack() {
   if (State.historyIdx <= 0) return;
   State.historyIdx--;
-  const id = State.history[State.historyIdx];
   if (State.currentPath.length) State.currentPath.pop();
-  loadFiles(id);
-  renderBreadcrumb();
+  loadFiles(State.history[State.historyIdx]); renderBreadcrumb();
 }
-
 function goForward() {
-  if (State.historyIdx >= State.history.length - 1) return;
+  if (State.historyIdx >= State.history.length-1) return;
   State.historyIdx++;
   loadFiles(State.history[State.historyIdx]);
 }
-
-function reload() { loadFiles(State.currentFolderId); }
-
+function reload() { if (State.provider) loadFiles(State.currentFolderId); }
 function navigateCrumb(idx) {
-  if (idx === -1) { State.currentPath = []; State.historyIdx = 0; loadFiles('root'); renderBreadcrumb(); return; }
+  if (idx===-1) { State.currentPath=[]; State.historyIdx=0; loadFiles('root'); renderBreadcrumb(); return; }
   const crumb = State.currentPath[idx];
   State.currentPath = State.currentPath.slice(0, idx);
-  loadFiles(crumb.id);
-  renderBreadcrumb();
+  loadFiles(crumb.id); renderBreadcrumb();
 }
-
 function renderBreadcrumb() {
   const bc = document.getElementById('breadcrumb');
   const name = State.activeBookmark?.name || 'Storage';
   let html = `<span class="crumb" onclick="navigateCrumb(-1)">${esc(name)}</span>`;
-  State.currentPath.forEach((p, i) => {
+  State.currentPath.forEach((p,i) => {
     html += `<span class="crumb-sep">›</span>`;
-    if (i === State.currentPath.length - 1) html += `<span class="crumb current">${esc(p.name)}</span>`;
-    else html += `<span class="crumb" onclick="navigateCrumb(${i})">${esc(p.name)}</span>`;
+    html += i===State.currentPath.length-1
+      ? `<span class="crumb current">${esc(p.name)}</span>`
+      : `<span class="crumb" onclick="navigateCrumb(${i})">${esc(p.name)}</span>`;
   });
   bc.innerHTML = html;
-  document.getElementById('addressbar').value = buildPath();
-  document.getElementById('stat-path').textContent = buildPath();
+  const path = '/' + State.currentPath.map(p=>p.name).join('/');
+  document.getElementById('addressbar').value = path;
+  document.getElementById('stat-path').textContent = path;
 }
 
-function buildPath() {
-  return '/' + State.currentPath.map(p => p.name).join('/');
-}
-
-// ═══════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 //  FILE OPERATIONS
-// ═══════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 async function downloadSelected() {
-  if (!State.provider) { toast('Not connected', 'error'); return; }
-  const files = State.filtered.filter(f => State.selected.has(f.id) && !f.isFolder);
-  if (!files.length) { toast('Select files to download', 'info'); return; }
+  if (!State.provider) { toast('Not connected','error'); return; }
+  const files = State.filtered.filter(f=>State.selected.has(f.id)&&!f.isFolder);
+  if (!files.length) { toast('Select files to download','info'); return; }
   for (const f of files) {
-    const tid = addTransfer(f.name, 'download');
-    try { await State.provider.download(f); updateTransfer(tid, 100, 'done'); } catch(e) { updateTransfer(tid, 0, 'error'); toast(e.message, 'error'); }
+    const tid = addTransfer(f.name,'download');
+    try { await State.provider.download(f); updateTransfer(tid,100,'done'); }
+    catch(e) { updateTransfer(tid,0,'error'); toast(e.message,'error'); }
   }
 }
-
 function promptNewFolder() {
-  if (!State.provider) { toast('Not connected', 'error'); return; }
-  document.getElementById('folder-name-input').value = '';
+  if (!State.provider) { toast('Not connected','error'); return; }
+  document.getElementById('folder-name-input').value='';
   openModal('modal-folder');
-  setTimeout(() => document.getElementById('folder-name-input').focus(), 100);
+  setTimeout(()=>document.getElementById('folder-name-input').focus(),100);
 }
-
 async function createFolder() {
-  const name = document.getElementById('folder-name-input').value.trim();
-  if (!name) return;
+  const name = document.getElementById('folder-name-input').value.trim(); if(!name) return;
   closeModal('modal-folder');
-  try {
-    await State.provider.createFolder(State.currentFolderId, name);
-    toast('Folder created', 'success');
-    reload();
-  } catch(e) { toast('Error: ' + e.message, 'error'); }
+  try { await State.provider.createFolder(State.currentFolderId, name); toast('Folder created','success'); reload(); }
+  catch(e) { toast('Error: '+e.message,'error'); }
 }
-
 function deleteSelected() {
   if (!State.provider) return;
-  const files = State.filtered.filter(f => State.selected.has(f.id));
-  if (!files.length) { toast('Select files to delete', 'info'); return; }
+  const files = State.filtered.filter(f=>State.selected.has(f.id));
+  if (!files.length) { toast('Select files to delete','info'); return; }
   document.getElementById('delete-msg').textContent = `Delete ${files.length} item(s)? This cannot be undone.`;
   document.getElementById('confirm-delete-btn').onclick = async () => {
     closeModal('modal-delete');
-    for (const f of files) {
-      try { await State.provider.delete(f); } catch(e) { toast('Delete failed: ' + e.message, 'error'); }
-    }
-    toast(`Deleted ${files.length} item(s)`, 'success');
-    reload();
+    for (const f of files) { try { await State.provider.delete(f); } catch(e) { toast('Delete failed: '+e.message,'error'); } }
+    toast(`Deleted ${files.length} item(s)`,'success'); reload();
   };
   openModal('modal-delete');
 }
-
 let renameTarget = null;
 function promptRename(file) {
   renameTarget = file;
   document.getElementById('rename-input').value = file.name;
   openModal('modal-rename');
-  setTimeout(() => { const i = document.getElementById('rename-input'); i.focus(); i.select(); }, 100);
+  setTimeout(()=>{ const i=document.getElementById('rename-input'); i.focus(); i.select(); },100);
 }
-
 async function doRename() {
   const newName = document.getElementById('rename-input').value.trim();
   if (!newName || !renameTarget) return;
   closeModal('modal-rename');
-  try {
-    await State.provider.rename(renameTarget, newName);
-    toast('Renamed successfully', 'success');
-    reload();
-  } catch(e) { toast('Rename failed: ' + e.message, 'error'); }
+  try { await State.provider.rename(renameTarget, newName); toast('Renamed','success'); reload(); }
+  catch(e) { toast('Rename failed: '+e.message,'error'); }
 }
 
-// ═══════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 //  UPLOAD
-// ═══════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 function triggerUpload() {
-  if (!State.provider) { toast('Connect to a storage first', 'error'); return; }
+  if (!State.provider) { toast('Connect to storage first','error'); return; }
   document.getElementById('file-input').click();
 }
-
 async function handleFileInput(files) {
-  for (const file of files) { await uploadFile(file); }
-  document.getElementById('file-input').value = '';
-  reload();
+  for (const f of files) await uploadFile(f);
+  document.getElementById('file-input').value=''; reload();
 }
-
 async function uploadFile(file) {
-  const tid = addTransfer(file.name, 'upload');
-  try {
-    await State.provider.upload(State.currentFolderId, file, pct => updateTransfer(tid, pct, 'running'));
-    updateTransfer(tid, 100, 'done');
-    toast('Uploaded ' + file.name, 'success');
-  } catch(e) {
-    updateTransfer(tid, 0, 'error');
-    toast('Upload failed: ' + e.message, 'error');
-  }
+  const tid = addTransfer(file.name,'upload');
+  try { await State.provider.upload(State.currentFolderId, file, pct=>updateTransfer(tid,pct,'running')); updateTransfer(tid,100,'done'); toast('Uploaded '+file.name,'success'); }
+  catch(e) { updateTransfer(tid,0,'error'); toast('Upload failed: '+e.message,'error'); }
 }
-
-// Drag & drop
-document.addEventListener('dragover', e => { e.preventDefault(); if (State.provider) document.getElementById('drop-overlay').classList.add('active'); });
-document.addEventListener('dragleave', e => { if (!e.relatedTarget) document.getElementById('drop-overlay').classList.remove('active'); });
-document.addEventListener('drop', async e => {
-  e.preventDefault();
-  document.getElementById('drop-overlay').classList.remove('active');
-  if (!State.provider) { toast('Connect to a storage first', 'error'); return; }
-  const files = [...e.dataTransfer.files];
-  for (const file of files) await uploadFile(file);
+document.addEventListener('dragover', e=>{ e.preventDefault(); if(State.provider) document.getElementById('drop-overlay').classList.add('active'); });
+document.addEventListener('dragleave', e=>{ if(!e.relatedTarget) document.getElementById('drop-overlay').classList.remove('active'); });
+document.addEventListener('drop', async e=>{
+  e.preventDefault(); document.getElementById('drop-overlay').classList.remove('active');
+  if (!State.provider) { toast('Connect to storage first','error'); return; }
+  for (const f of [...e.dataTransfer.files]) await uploadFile(f);
   reload();
 });
 
-// ═══════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 //  TRANSFER QUEUE
-// ═══════════════════════════════════════════════════════
-function addTransfer(name, direction) {
-  const id = Date.now().toString();
-  State.transfers.unshift({ id, name, direction, progress: 0, status: 'running' });
-  renderQueue();
-  return id;
-}
-
-function updateTransfer(id, progress, status) {
-  const t = State.transfers.find(x => x.id === id);
-  if (!t) return;
-  t.progress = progress; t.status = status;
-  renderQueue();
-}
-
+// ═══════════════════════════════════════════════════════════════
+function addTransfer(name,dir) { const id=Date.now().toString(); State.transfers.unshift({id,name,direction:dir,progress:0,status:'running'}); renderQueue(); return id; }
+function updateTransfer(id,progress,status) { const t=State.transfers.find(x=>x.id===id); if(t){t.progress=progress;t.status=status;} renderQueue(); }
 function renderQueue() {
-  const body = document.getElementById('queue-body');
-  document.getElementById('queue-count').textContent = State.transfers.length + ' item' + (State.transfers.length !== 1 ? 's' : '');
-  body.innerHTML = State.transfers.slice(0, 20).map(t => `
+  document.getElementById('queue-count').textContent = State.transfers.length+' item'+(State.transfers.length!==1?'s':'');
+  document.getElementById('queue-body').innerHTML = State.transfers.slice(0,20).map(t=>`
     <div class="transfer-row">
-      <span class="tr-icon">${t.direction === 'upload' ? '↑' : '↓'}</span>
+      <span class="tr-icon">${t.direction==='upload'?'↑':'↓'}</span>
       <div class="tr-info">
         <div class="tr-name">${esc(t.name)}</div>
         <div class="progress-bar"><div class="progress-fill ${t.status}" style="width:${t.progress}%"></div></div>
-        <div class="tr-status">${t.status === 'done' ? 'Complete' : t.status === 'error' ? 'Failed' : t.progress + '%'}</div>
+        <div class="tr-status">${t.status==='done'?'Complete':t.status==='error'?'Failed':t.progress+'%'}</div>
       </div>
-    </div>
-  `).join('');
+    </div>`).join('');
 }
-
 let queueCollapsed = false;
 function toggleQueue() {
-  queueCollapsed = !queueCollapsed;
-  document.getElementById('queue-panel').classList.toggle('collapsed', queueCollapsed);
-  document.getElementById('queue-chevron').textContent = queueCollapsed ? '▼' : '▲';
+  queueCollapsed=!queueCollapsed;
+  document.getElementById('queue-panel').classList.toggle('collapsed',queueCollapsed);
+  document.getElementById('queue-chevron').textContent=queueCollapsed?'▼':'▲';
 }
 
-// ═══════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 //  SORT & FILTER
-// ═══════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 function sortBy(key) {
-  const keyMap = { name: 'name', size: 'size', type: 'mimeType', date: 'modified' };
-  const mapped = keyMap[key] || key;
-  if (State.sortKey === mapped) State.sortAsc = !State.sortAsc;
-  else { State.sortKey = mapped; State.sortAsc = true; }
-  ['name','size','type','date'].forEach(k => {
-    const el = document.getElementById('sort-' + k);
-    if (el) el.style.display = k === key ? '' : 'none';
-    if (el && k === key) el.textContent = State.sortAsc ? '▲' : '▼';
+  const map={name:'name',size:'size',type:'mimeType',date:'modified'}, mapped=map[key]||key;
+  if(State.sortKey===mapped) State.sortAsc=!State.sortAsc; else{State.sortKey=mapped;State.sortAsc=true;}
+  ['name','size','type','date'].forEach(k=>{
+    const el=document.getElementById('sort-'+k); if(!el) return;
+    el.style.display=k===key?'':'none';
+    if(k===key) el.textContent=State.sortAsc?'▲':'▼';
   });
   applySort(); renderFiles();
 }
+function filterFiles(text) { State.filterText=text.toLowerCase(); applySort(); renderFiles(); }
 
-function filterFiles(text) {
-  State.filterText = text.toLowerCase();
-  applySort(); renderFiles();
-}
-
-// ═══════════════════════════════════════════════════════
-//  STATUS & UI STATE
-// ═══════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+//  STATUS & UI
+// ═══════════════════════════════════════════════════════════════
 function updateStatus() {
-  const sel = State.selected.size;
-  document.getElementById('stat-items').textContent = State.filtered.length + ' items';
-  const el = document.getElementById('stat-selected');
-  if (sel) { el.style.display = ''; el.textContent = sel + ' selected'; } else el.style.display = 'none';
+  document.getElementById('stat-items').textContent = State.filtered.length+' items';
+  const el=document.getElementById('stat-selected');
+  if(State.selected.size){el.style.display='';el.textContent=State.selected.size+' selected';}else el.style.display='none';
 }
-
 function showLoading(msg) {
-  document.getElementById('file-table').style.display = 'none';
-  const es = document.getElementById('empty-state');
-  es.style.display = 'flex';
-  es.innerHTML = `<div class="spinner"></div><div style="color:var(--muted);font-size:13px">${msg}</div>`;
+  document.getElementById('file-table').style.display='none';
+  const es=document.getElementById('empty-state');
+  es.style.display='flex';
+  es.innerHTML=`<div class="spinner"></div><div style="color:var(--muted);font-size:13px">${msg}</div>`;
 }
-
 function showEmpty(msg) {
-  document.getElementById('file-table').style.display = 'none';
-  const es = document.getElementById('empty-state');
-  es.style.display = 'flex';
-  es.innerHTML = `<div class="state-icon">☁</div><div class="state-title">No connection</div><div class="state-sub">${msg || 'Select a bookmark or add a new connection.'}</div>`;
+  document.getElementById('file-table').style.display='none';
+  const es=document.getElementById('empty-state');
+  es.style.display='flex';
+  es.innerHTML=`<div class="state-icon">☁</div><div class="state-title">No connection open</div><div class="state-sub">${msg||'Click <strong>+ Connect</strong> to add a storage account.'}</div>`;
 }
 
-// ═══════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 //  MODAL HELPERS
-// ═══════════════════════════════════════════════════════
-function openModal(id) { document.getElementById(id).classList.add('open'); }
-function closeModal(id) { document.getElementById(id).classList.remove('open'); }
-document.querySelectorAll('.overlay').forEach(el => el.addEventListener('click', e => { if (e.target === el) el.classList.remove('open'); }));
+// ═══════════════════════════════════════════════════════════════
+function openModal(id){document.getElementById(id).classList.add('open');}
+function closeModal(id){document.getElementById(id).classList.remove('open');}
+document.querySelectorAll('.overlay').forEach(el=>el.addEventListener('click',e=>{if(e.target===el)el.classList.remove('open');}));
 
-// ═══════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 //  TOAST
-// ═══════════════════════════════════════════════════════
-function toast(msg, type = 'info') {
-  const c = document.getElementById('toasts');
-  const el = document.createElement('div');
-  el.className = 'toast ' + type;
-  const icons = { success: '✓', error: '✕', info: '·' };
-  el.innerHTML = `<span>${icons[type]||'·'}</span> ${esc(msg)}`;
+// ═══════════════════════════════════════════════════════════════
+function toast(msg,type='info'){
+  const c=document.getElementById('toasts');
+  const el=document.createElement('div');
+  el.className='toast '+type;
+  el.innerHTML=`<span>${{success:'✓',error:'✕',info:'·'}[type]||'·'}</span> ${esc(msg)}`;
   c.appendChild(el);
-  setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; setTimeout(() => el.remove(), 300); }, 4000);
+  setTimeout(()=>{el.style.opacity='0';el.style.transition='opacity .3s';setTimeout(()=>el.remove(),300);},4000);
 }
 
-// ═══════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 //  UTILS
-// ═══════════════════════════════════════════════════════
-function fileIcon(f) {
-  if (f.isFolder) return '📁';
-  const m = f.mimeType || '';
-  if (m.includes('google-apps.document') || m.includes('wordprocessing') || m.includes('msword')) return '📝';
-  if (m.includes('spreadsheet') || m.includes('excel')) return '📊';
-  if (m.includes('presentation') || m.includes('powerpoint')) return '📑';
-  if (m.includes('pdf')) return '📕';
-  if (m.startsWith('image/')) return '🖼';
-  if (m.startsWith('video/')) return '🎬';
-  if (m.startsWith('audio/')) return '🎵';
-  if (m.includes('zip') || m.includes('tar') || m.includes('gz')) return '🗜';
-  if (m.includes('javascript') || m.includes('python') || m.includes('json') || m.includes('html') || m.includes('css') || m.includes('text/')) return '📄';
+// ═══════════════════════════════════════════════════════════════
+function fileIcon(f){
+  if(f.isFolder) return '📁';
+  const m=f.mimeType||'';
+  if(m.includes('google-apps.document')||m.includes('wordprocessing')||m.includes('msword')) return '📝';
+  if(m.includes('spreadsheet')||m.includes('excel')) return '📊';
+  if(m.includes('presentation')||m.includes('powerpoint')) return '📑';
+  if(m.includes('pdf')) return '📕';
+  if(m.startsWith('image/')) return '🖼';
+  if(m.startsWith('video/')) return '🎬';
+  if(m.startsWith('audio/')) return '🎵';
+  if(m.includes('zip')||m.includes('tar')||m.includes('gz')) return '🗜';
   return '📄';
 }
-
-function mimeLabel(m) {
-  if (!m) return 'File';
-  if (m.includes('folder')) return 'Folder';
-  if (m.includes('google-apps.document')) return 'Google Doc';
-  if (m.includes('google-apps.spreadsheet')) return 'Google Sheet';
-  if (m.includes('google-apps.presentation')) return 'Google Slides';
-  if (m.includes('pdf')) return 'PDF';
-  if (m.startsWith('image/')) return 'Image';
-  if (m.startsWith('video/')) return 'Video';
-  if (m.startsWith('audio/')) return 'Audio';
-  if (m.startsWith('text/')) return 'Text';
-  if (m.includes('zip')) return 'Archive';
+function mimeLabel(m){
+  if(!m) return 'File';
+  if(m.includes('folder')) return 'Folder';
+  if(m.includes('google-apps.document')) return 'Google Doc';
+  if(m.includes('google-apps.spreadsheet')) return 'Google Sheet';
+  if(m.includes('google-apps.presentation')) return 'Google Slides';
+  if(m.includes('pdf')) return 'PDF';
+  if(m.startsWith('image/')) return 'Image';
+  if(m.startsWith('video/')) return 'Video';
+  if(m.startsWith('audio/')) return 'Audio';
+  if(m.startsWith('text/')) return 'Text';
+  if(m.includes('zip')) return 'Archive';
   return m.split('/').pop().toUpperCase().slice(0,12);
 }
-
-function fmtSize(bytes) {
-  if (!bytes) return '—';
-  const b = +bytes;
-  if (b < 1024) return b + ' B';
-  if (b < 1048576) return (b/1024).toFixed(1) + ' KB';
-  if (b < 1073741824) return (b/1048576).toFixed(1) + ' MB';
-  return (b/1073741824).toFixed(2) + ' GB';
+function fmtSize(bytes){
+  if(!bytes) return '—';
+  const b=+bytes;
+  if(b<1024) return b+' B';
+  if(b<1048576) return (b/1024).toFixed(1)+' KB';
+  if(b<1073741824) return (b/1048576).toFixed(1)+' MB';
+  return (b/1073741824).toFixed(2)+' GB';
 }
-
-function fmtDate(iso) {
-  if (!iso) return '—';
-  const d = new Date(iso), now = new Date(), diff = now - d;
-  if (diff < 60000) return 'Just now';
-  if (diff < 3600000) return Math.floor(diff/60000) + 'm ago';
-  if (diff < 86400000) return Math.floor(diff/3600000) + 'h ago';
-  if (diff < 604800000) return Math.floor(diff/86400000) + 'd ago';
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' });
+function fmtDate(iso){
+  if(!iso) return '—';
+  const d=new Date(iso),now=new Date(),diff=now-d;
+  if(diff<60000) return 'Just now';
+  if(diff<3600000) return Math.floor(diff/60000)+'m ago';
+  if(diff<86400000) return Math.floor(diff/3600000)+'h ago';
+  if(diff<604800000) return Math.floor(diff/86400000)+'d ago';
+  return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'});
 }
+function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function showHelp(){toast('Clouduck — press / to filter, Backspace to go up, Ctrl+A to select all','info');}
+function showEditMenu(){toast('Select files then use toolbar or right-click','info');}
 
-function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-
-function showHelp() { toast('Clouduck — Free Cyberduck-like cloud manager. Press / to filter files.', 'info'); }
-function showEditMenu() { toast('Select files and use toolbar buttons or right-click for options', 'info'); }
-
-// ─── KEYBOARD SHORTCUTS ──────────────────────────────
-document.addEventListener('keydown', e => {
-  if (e.key === 'F5' || (e.key === 'r' && (e.ctrlKey || e.metaKey))) { e.preventDefault(); if (State.provider) reload(); }
-  if (e.key === 'Backspace' && document.activeElement.tagName !== 'INPUT') { e.preventDefault(); goBack(); }
-  if (e.key === 'Delete') { if (document.activeElement.tagName !== 'INPUT') deleteSelected(); }
-  if (e.key === '/' && document.activeElement.tagName !== 'INPUT') { e.preventDefault(); document.getElementById('search-input').focus(); }
-  if (e.key === 'Escape') { document.getElementById('search-input').value = ''; filterFiles(''); document.getElementById('search-input').blur(); }
-  if (e.key === 'a' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); State.filtered.forEach(f => State.selected.add(f.id)); document.querySelectorAll('#file-tbody tr').forEach(tr => tr.classList.add('selected')); updateStatus(); }
+// ─── KEYBOARD SHORTCUTS ──────────────────────────────────────
+document.addEventListener('keydown', e=>{
+  if((e.key==='F5')||(e.key==='r'&&(e.ctrlKey||e.metaKey))){e.preventDefault();reload();}
+  if(e.key==='Backspace'&&document.activeElement.tagName!=='INPUT'){e.preventDefault();goBack();}
+  if(e.key==='Delete'&&document.activeElement.tagName!=='INPUT') deleteSelected();
+  if(e.key==='/'&&document.activeElement.tagName!=='INPUT'){e.preventDefault();document.getElementById('search-input').focus();}
+  if(e.key==='Escape'){document.getElementById('search-input').value='';filterFiles('');document.getElementById('search-input').blur();}
+  if(e.key==='a'&&(e.ctrlKey||e.metaKey)){e.preventDefault();State.filtered.forEach(f=>State.selected.add(f.id));document.querySelectorAll('#file-tbody tr').forEach(tr=>tr.classList.add('selected'));updateStatus();}
 });
 
-// ─── INIT ────────────────────────────────────────────
+// ─── INIT ────────────────────────────────────────────────────
 renderBookmarks();
 renderQueue();
 
-// ─── AUTO-CONNECT saved bookmarks on page load ────────
-// Dropbox & S3: instant (no OAuth popup, uses stored creds)
-// Google Drive: silent token refresh (works if browser has active Google session)
-// OneDrive: silent MSAL token refresh (works if MSAL cache is present)
-async function autoConnectAll() {
-  if (!State.bookmarks.length) return;
-
-  // Connect the first bookmark automatically (most recently used)
-  // Try all; first one that succeeds becomes active
+// Auto-restore: try to silently reconnect saved bookmarks on page load
+// Dropbox/S3 always work. Google/OneDrive work if browser session is still active.
+(async () => {
   for (const bm of State.bookmarks) {
     try {
-      await openBookmark(bm, true);
-      break; // stop after first successful auto-connect
+      // Try silently — openBookmark handles everything
+      // For Dropbox/S3 this is instant
+      // For Google/OneDrive this uses stored tokens from localStorage
+      await openBookmark(bm);
+      break; // connect first bookmark only; user can click others
     } catch(e) {
-      // Silent fail — user can manually click the bookmark to log in
-      console.log(`Auto-connect silent fail for ${bm.name}:`, e.message);
+      console.log('Auto-restore failed for', bm.name);
     }
   }
-}
-
-// Small delay so GAPI/GIS scripts finish loading before we attempt silent auth
-setTimeout(autoConnectAll, 800);
-
+})();
 </script>
 </body>
 </html>
