@@ -559,23 +559,56 @@ const GDriveProvider = {
     });
   },
 
-  connect() {
+  _storeKey() { return 'clouduck_gd_' + this.clientId; },
+
+  _saveToken(token, email) {
+    localStorage.setItem(this._storeKey(), JSON.stringify({
+      token, email, expiry: Date.now() + 55 * 60 * 1000  // 55 min (tokens last 1hr)
+    }));
+  },
+
+  _loadToken() {
+    try { return JSON.parse(localStorage.getItem(this._storeKey())); } catch { return null; }
+  },
+
+  clearToken() { localStorage.removeItem(this._storeKey()); },
+
+  connect(silent = false) {
     return new Promise((resolve, reject) => {
+      // 1 — Check stored token first (valid for 55 min)
+      const stored = this._loadToken();
+      if (stored && stored.expiry > Date.now()) {
+        this.token = stored.token;
+        this.userEmail = stored.email;
+        gapi.client.setToken({ access_token: this.token });
+        resolve({ email: stored.email });
+        return;
+      }
+
+      // 2 — Try silent re-auth (no popup, works while browser has Google session)
+      const hint = stored?.email || '';
       const tc = google.accounts.oauth2.initTokenClient({
         client_id: this.clientId,
         scope: 'https://www.googleapis.com/auth/drive',
+        hint,
         callback: async (resp) => {
-          if (resp.error) { reject(new Error(resp.error)); return; }
+          if (resp.error) {
+            if (silent) { reject(new Error('silent_fail')); return; }
+            reject(new Error(resp.error)); return;
+          }
           this.token = resp.access_token;
           gapi.client.setToken({ access_token: this.token });
           try {
             const r = await gapi.client.drive.about.get({ fields: 'user' });
             this.userEmail = r.result.user.emailAddress;
+            this._saveToken(this.token, this.userEmail);
             resolve({ email: this.userEmail });
           } catch(e) { reject(e); }
         }
       });
-      tc.requestAccessToken({ prompt: 'select_account' });
+      // silent = '' means no popup consent screen (invisible refresh)
+      // non-silent = 'select_account' shows account picker
+      tc.requestAccessToken({ prompt: silent ? '' : 'select_account' });
     });
   },
 
@@ -661,8 +694,26 @@ const OneDriveProvider = {
     });
   },
 
-  async connect() {
+  async connect(silent = false) {
     const scopes = ['Files.ReadWrite', 'User.Read'];
+
+    // 1 — Try silent token refresh (MSAL caches accounts in localStorage)
+    const accounts = this.msalApp.getAllAccounts();
+    if (accounts.length > 0) {
+      try {
+        const tr = await this.msalApp.acquireTokenSilent({ scopes, account: accounts[0] });
+        this.token = tr.accessToken;
+        this.account = accounts[0];
+        return { email: accounts[0].username };
+      } catch(silentErr) {
+        if (silent) throw new Error('silent_fail');
+        // Fall through to popup
+      }
+    }
+
+    if (silent) throw new Error('silent_fail');
+
+    // 2 — Fall back to popup login
     try {
       const r = await this.msalApp.loginPopup({ scopes });
       const tr = await this.msalApp.acquireTokenSilent({ scopes, account: r.account });
@@ -725,7 +776,7 @@ const DropboxProvider = {
   icon: '📦',
 
   async init(config) { this.token = config.token; },
-  async connect() {
+  async connect(silent = false) {
     const r = await this._api('users/get_current_account', {});
     return { email: r.email };
   },
@@ -803,7 +854,7 @@ const S3Provider = {
     this.region = config.region || 'us-east-1';
   },
 
-  async connect() { await this.listFiles('root'); return { email: this.bucket }; },
+  async connect(silent = false) { await this.listFiles('root'); return { email: this.bucket }; },
 
   async listFiles(prefix = 'root') {
     const p = prefix === 'root' ? '' : prefix;
@@ -956,17 +1007,18 @@ async function connectBookmark() {
 // ═══════════════════════════════════════════════════════
 const PROVIDERS = { googledrive: GDriveProvider, onedrive: OneDriveProvider, dropbox: DropboxProvider, s3: S3Provider };
 
-async function openBookmark(bm) {
-  State.activeBookmark = bm;
-  renderBookmarks();
-  showLoading('Connecting to ' + bm.name + '…');
+async function openBookmark(bm, silent = false) {
+  if (!silent) {
+    State.activeBookmark = bm;
+    renderBookmarks();
+    showLoading('Connecting to ' + bm.name + '…');
+  }
 
   try {
     const pProto = PROVIDERS[bm.type];
-    // Create fresh instance
     const p = Object.create(pProto);
     await p.init(bm.config);
-    const info = await p.connect();
+    const info = await p.connect(silent);
     State.provider = p;
     State.currentFolderId = 'root';
     State.currentPath = [];
@@ -974,12 +1026,16 @@ async function openBookmark(bm) {
     State.historyIdx = 0;
     bm.email = info.email;
     saveBookmarks();
+    State.activeBookmark = bm;
     renderBookmarks();
     document.getElementById('stat-provider').textContent = bm.name + (info.email ? ' · ' + info.email : '');
-    toast('Connected to ' + bm.name, 'success');
+    if (!silent) toast('Connected to ' + bm.name, 'success');
     await loadFiles('root');
   } catch(e) {
+    if (silent) throw e;  // let autoConnect handle it
     console.error(e);
+    // If token expired, clear it so next click forces fresh login
+    if (PROVIDERS[bm.type]?.clearToken) PROVIDERS[bm.type].clearToken?.call({ clientId: bm.config.clientId });
     toast('Connection failed: ' + e.message, 'error');
     showEmpty();
   }
@@ -997,11 +1053,20 @@ function renderBookmarks() {
   const c = document.getElementById('bookmark-list');
   if (!State.bookmarks.length) { c.innerHTML = ''; return; }
   c.innerHTML = State.bookmarks.map(bm => `
-    <div class="bookmark-item ${State.activeBookmark?.id === bm.id ? 'active' : ''}" onclick="openBookmark(${JSON.stringify(bm).replace(/"/g,'&quot;')})">
-      <div class="bm-icon" style="background:${bm.color}22;color:${bm.color}">${{googledrive:'🟡',onedrive:'🔵',dropbox:'📦',s3:'🪣'}[bm.type]}</div>
+    <div class="bookmark-item ${State.activeBookmark?.id === bm.id ? 'active' : ''}"
+      onclick="openBookmark(${JSON.stringify(bm).replace(/"/g,'&quot;')})">
+      <div class="bm-icon" style="background:${bm.color}22;color:${bm.color}">
+        ${{googledrive:'🟡',onedrive:'🔵',dropbox:'📦',s3:'🪣'}[bm.type]}
+      </div>
       <div class="bm-info">
         <div class="bm-name">${esc(bm.name)}</div>
-        <div class="bm-host">${esc(bm.email || bm.type)}</div>
+        <div class="bm-host" style="display:flex;align-items:center;gap:5px">
+          ${State.activeBookmark?.id === bm.id
+            ? `<span style="width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block;flex-shrink:0"></span>`
+            : `<span style="width:6px;height:6px;border-radius:50%;background:var(--muted2);display:inline-block;flex-shrink:0"></span>`
+          }
+          ${esc(bm.email || bm.type)}
+        </div>
       </div>
       <button class="bm-remove" onclick="removeBookmark('${bm.id}',event)" title="Remove">✕</button>
     </div>
@@ -1457,6 +1522,30 @@ document.addEventListener('keydown', e => {
 // ─── INIT ────────────────────────────────────────────
 renderBookmarks();
 renderQueue();
+
+// ─── AUTO-CONNECT saved bookmarks on page load ────────
+// Dropbox & S3: instant (no OAuth popup, uses stored creds)
+// Google Drive: silent token refresh (works if browser has active Google session)
+// OneDrive: silent MSAL token refresh (works if MSAL cache is present)
+async function autoConnectAll() {
+  if (!State.bookmarks.length) return;
+
+  // Connect the first bookmark automatically (most recently used)
+  // Try all; first one that succeeds becomes active
+  for (const bm of State.bookmarks) {
+    try {
+      await openBookmark(bm, true);
+      break; // stop after first successful auto-connect
+    } catch(e) {
+      // Silent fail — user can manually click the bookmark to log in
+      console.log(`Auto-connect silent fail for ${bm.name}:`, e.message);
+    }
+  }
+}
+
+// Small delay so GAPI/GIS scripts finish loading before we attempt silent auth
+setTimeout(autoConnectAll, 800);
+
 </script>
 </body>
 </html>
